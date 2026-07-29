@@ -30,7 +30,10 @@ from delta_model.settings import (
 # Known provider identifiers
 # ---------------------------------------------------------------------------
 
-_KNOWN_PROVIDERS = ("anthropic", "openai", "scripted")
+_KNOWN_PROVIDERS = ("anthropic", "openai", "openrouter", "ollama", "scripted")
+
+# OpenAI-compatible backends reuse the OpenAI adapter with a different base URL.
+_OPENAI_COMPATIBLE = ("openai", "openrouter", "ollama")
 
 
 # ---------------------------------------------------------------------------
@@ -39,14 +42,21 @@ _KNOWN_PROVIDERS = ("anthropic", "openai", "scripted")
 
 
 def _detect_provider_name() -> str | None:
-    """Infer the provider name from environment variables.
+    """Infer the provider name from environment variables, then saved config.
 
-    Checks ``DELTA_PROVIDER`` first, then falls back to whichever API key is
-    present.  Returns ``None`` when nothing is detectable.
+    Checks ``DELTA_PROVIDER`` first, then the user's ``config.toml``, then
+    falls back to whichever API key is present.  Returns ``None`` when nothing
+    is detectable.
     """
     explicit = os.environ.get("DELTA_PROVIDER")
     if explicit:
         return explicit.strip().lower()
+
+    from delta_app.config.store import load_config
+
+    saved = load_config().provider
+    if saved:
+        return saved.strip().lower()
 
     if os.environ.get("ANTHROPIC_API_KEY"):
         return "anthropic"
@@ -111,7 +121,7 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         profile = load_anthropic_profile()
         return _build_anthropic(profile)
 
-    if resolved == "openai":
+    if resolved in _OPENAI_COMPATIBLE:
         profile = load_openai_profile()
         return _build_openai(profile)
 

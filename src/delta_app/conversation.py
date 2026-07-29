@@ -27,10 +27,10 @@ import importlib.metadata
 import json
 import os
 import subprocess
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from time import time
 
 from delta_harness.contracts.stream import (
     AgentEvent,
@@ -43,13 +43,11 @@ from delta_harness.contracts.transcript import (
     ModelEntry,
     PruneSummaryEntry,
     ShellResultEntry,
-    TextSegment,
     TranscriptEntry,
     surface_text,
 )
 from delta_harness.contracts.values import JValue
 from delta_harness.harness import (
-    EventCallback,
     PendingBatch,
     QueueShiftEvent,
     RuntimeConfig,
@@ -57,6 +55,7 @@ from delta_harness.harness import (
 )
 from delta_harness.provider.base import ModelProvider
 from delta_harness.provider.wire import StreamCloseEvent
+from delta_harness.session.index import SessionCatalog, SessionMeta
 from delta_harness.session.records import (
     ForkSummaryRecord,
     ModelSwapRecord,
@@ -70,8 +69,6 @@ from delta_harness.session.records import (
     mint_id,
 )
 from delta_harness.session.replay import (
-    ProjectedState,
-    find_tip,
     project_records,
     trace_to_entry,
 )
@@ -106,6 +103,31 @@ _NAMING_SYSTEM = (
     "Return only the title, nothing else."
 )
 
+_TITLE_MAX_CHARS = 48
+
+#: Re-summarise the session title once it has grown this many entries since
+#: the last automatic naming.
+_RENAME_EVERY_N_ENTRIES = 8
+
+
+def summarize_prompt(text: str, *, limit: int = _TITLE_MAX_CHARS) -> str:
+    """Condense a prompt into a one-line session title.
+
+    Collapses whitespace, strips a leading slash-command marker, and clips on
+    a word boundary. Returns ``""`` when *text* has no usable content.
+    """
+    flat = " ".join(text.split())
+    if flat.startswith("/"):
+        flat = flat.lstrip("/")
+    if not flat:
+        return ""
+    if len(flat) <= limit:
+        return flat
+    clipped = flat[:limit]
+    if " " in clipped:
+        clipped = clipped.rsplit(" ", 1)[0]
+    return clipped.rstrip(" ,.;:-") + "…"
+
 
 # ── session statistics ─────────────────────────────────────────────────────
 
@@ -139,6 +161,7 @@ class CodingSession:
         *,
         session_id: str,
         vault: JsonlVault | None,
+        catalog: SessionCatalog | None = None,
         provider: ModelProvider,
         provider_name: str,
         model: str,
@@ -153,6 +176,7 @@ class CodingSession:
     ) -> None:
         self._session_id = session_id
         self._vault = vault
+        self._catalog = catalog
         self._provider = provider
         self._provider_name = provider_name
         self._model = model
@@ -164,6 +188,8 @@ class CodingSession:
         self._tip_id: str | None = self._record_ids[-1] if self._record_ids else None
         self._extensions: list[object] = []
         self._named = title is not None
+        self._named_at = 0
+        self._renamed_manually = False
         self._tools_loader = tools_loader
 
         # Cumulative stats
@@ -212,12 +238,25 @@ class CodingSession:
         """Create a new coding session with optional persistence."""
         sid = session_id or mint_id()[:12]
         vault: JsonlVault | None = None
+        catalog: SessionCatalog | None = None
+        effective_cwd = cwd or os.getcwd()
         if sessions_dir is not None:
             vault = JsonlVault(sessions_dir / f"{sid}.jsonl")
-            await vault.append(SessionMetaRecord(cwd=cwd or os.getcwd()))
+            await vault.append(SessionMetaRecord(cwd=effective_cwd))
+            catalog = SessionCatalog(sessions_dir)
+            catalog.upsert(
+                SessionCatalog.prepare(
+                    session_id=sid,
+                    vault_path=vault.path,
+                    cwd=effective_cwd,
+                    model=model,
+                    provider=provider_name,
+                )
+            )
         return cls(
             session_id=sid,
             vault=vault,
+            catalog=catalog,
             provider=provider,
             provider_name=provider_name,
             model=model,
@@ -248,9 +287,13 @@ class CodingSession:
         records = await vault.read_all()
         state = project_records(records)
 
+        catalog = SessionCatalog(sessions_dir)
+        catalog.touch(session_id)
+
         return cls(
             session_id=session_id,
             vault=vault,
+            catalog=catalog,
             provider=provider,
             provider_name=provider_name,
             model=state.model or model,
@@ -273,7 +316,32 @@ class CodingSession:
         handled automatically by the internal event subscriber and the
         post-run hook.
         """
+        # Name the session from its first prompt straight away, so listings
+        # never show a bare id while waiting on the model-generated title.
+        if not self._title:
+            self.set_provisional_title(text)
         return self._run_wrapped(self._harness.submit(text))
+
+    def _should_rename(self, entries: int) -> bool:
+        """Whether the title should be regenerated at *entries* messages.
+
+        The opening prompt stops describing a conversation once it has moved
+        on, so re-summarise as it grows rather than naming once forever.
+        """
+        if self._renamed_manually:
+            return False
+        return entries >= self._named_at + _RENAME_EVERY_N_ENTRIES
+
+    def set_provisional_title(self, text: str) -> None:
+        """Derive a placeholder title from *text* and publish it immediately.
+
+        Does not set ``_named``, so ``auto_name`` still refines it later.
+        """
+        title = summarize_prompt(text)
+        if not title:
+            return
+        self._title = title
+        self._sync_title_to_catalog(title)
 
     def resume_run(self) -> AsyncIterator[AgentEvent]:
         """Continue the agent loop without appending a new user message."""
@@ -417,15 +485,64 @@ class CodingSession:
         )
         title = title.strip().strip('"').strip("'")[:80]
         if not title:
-            title = self._session_id
+            # Never fall back to the raw session id — that is what surfaced as
+            # "random numbers" in session listings. Keep whatever we derived
+            # from the first prompt instead.
+            title = self._title or summarize_prompt(surface_text(transcript[0]))
+        if not title:
+            return self._session_id
 
         self._title = title
         self._named = True
         if self._vault:
             await self._vault.append(TagRecord(label=title))
+        self._sync_title_to_catalog(title)
         return title
 
+    # ── catalog sync ───────────────────────────────────────────────────
+
+    @property
+    def catalog(self) -> SessionCatalog | None:
+        """The session catalog, or ``None`` for ephemeral sessions."""
+        return self._catalog
+
+    def _sync_title_to_catalog(self, title: str) -> None:
+        """Push a title change to the session catalog, if one is active."""
+        if self._catalog is None:
+            return
+        existing = self._catalog.get(self._session_id)
+        if existing is None:
+            return
+        self._catalog.upsert(
+            SessionMeta(
+                session_id=existing.session_id,
+                vault_path=existing.vault_path,
+                cwd=existing.cwd,
+                model=existing.model,
+                provider=existing.provider,
+                title=title,
+                created_at=existing.created_at,
+                updated_at=time(),
+            )
+        )
+
     # ── slash-command dispatch ─────────────────────────────────────────
+
+    #: Slash commands, with one-line help. Drives autocomplete and /help.
+    COMMANDS: tuple[tuple[str, str], ...] = (
+        ("model", "Show or switch the model"),
+        ("provider", "Show or switch the provider"),
+        ("think", "Set the thinking/effort level"),
+        ("compact", "Summarise older context"),
+        ("stats", "Show token, turn, and cost stats"),
+        ("name", "Show or set the session title"),
+        ("export", "Export the transcript"),
+        ("branch", "Fork the conversation here"),
+        ("rewind", "Rewind to a prior entry"),
+        ("shell", "Run a shell command"),
+        ("reload", "Reload tools and extensions"),
+        ("diag", "Dump session diagnostics"),
+    )
 
     async def handle_command(self, text: str) -> str | None:
         """Handle a ``/``-prefixed command.
@@ -495,7 +612,7 @@ class CodingSession:
                 output=output,
                 exit_code=result.returncode,
             )
-        except (asyncio.TimeoutError, subprocess.TimeoutExpired):
+        except (TimeoutError, subprocess.TimeoutExpired):
             entry = ShellResultEntry(
                 command=command,
                 output="Command timed out",
@@ -788,9 +905,15 @@ class CodingSession:
             except Exception:  # noqa: BLE001
                 pass
 
-        if not self._named and len(self._harness.transcript) >= 2:
+        # Rename from the model as soon as there is an exchange to summarise,
+        # then re-summarise once the conversation has grown enough that the
+        # opening prompt no longer describes it. A provisional title (derived
+        # from the first prompt) does not count as named.
+        entries = len(self._harness.transcript)
+        if entries >= 2 and (not self._named or self._should_rename(entries)):
             try:
                 await self.auto_name()
+                self._named_at = entries
             except Exception:  # noqa: BLE001
                 pass
 
@@ -918,8 +1041,11 @@ class CodingSession:
             return f"Session: {self._title or self._session_id}"
         self._title = arg
         self._named = True
+        # An explicit name is final — stop auto-renaming over it.
+        self._renamed_manually = True
         if self._vault:
             await self._vault.append(TagRecord(label=arg))
+        self._sync_title_to_catalog(arg)
         return f"Session named: {arg}"
 
     async def _cmd_export(self, arg: str) -> str:

@@ -1,0 +1,235 @@
+/* Delta TUI — black, minimal, no chrome colour.
+   Geometry and palette live here so widget modules stay presentation-free. */
+
+Screen {
+    layout: vertical;
+    background: #000000;
+    color: #c8c8c8;
+}
+
+Header {
+    background: #000000;
+    color: #8a8a8a;
+    text-style: none;
+}
+
+Footer {
+    background: #000000;
+    color: #6a6a6a;
+}
+
+FooterKey {
+    background: #000000;
+    color: #6a6a6a;
+}
+
+FooterKey > .footer-key--key {
+    background: #000000;
+    color: #9a9a9a;
+}
+
+/* Row between header and footer: sidebar | main column. */
+#body {
+    height: 1fr;
+    width: 100%;
+    background: #000000;
+}
+
+Sidebar {
+    width: 28;
+    min-width: 18;
+    padding: 1 1;
+    background: #000000;
+    border-right: solid #1e1e1e;
+}
+
+#sidebar-title {
+    padding: 0 1 1 1;
+    color: #5a5a5a;
+    text-style: none;
+}
+
+#session-list {
+    height: 1fr;
+    background: #000000;
+    border: none;
+    scrollbar-size: 0 0;
+}
+
+#session-list > ListItem {
+    padding: 0 1;
+    background: #000000;
+    color: #7a7a7a;
+}
+
+#session-list > ListItem.active-session {
+    color: #e8e8e8;
+}
+
+#session-list > ListItem.-highlight {
+    background: #000000;
+    color: #c9a4ff;
+    text-style: none;
+}
+
+#main {
+    width: 1fr;
+    height: 100%;
+    background: #000000;
+}
+
+/* Transcript flexes; the composer below it is fixed height. */
+TranscriptView {
+    height: 1fr;
+    padding: 1 2;
+    background: #000000;
+    scrollbar-size: 0 0;
+}
+
+/* ── composer ─────────────────────────────────────────────────────── */
+
+Composer {
+    height: 3;
+    background: #000000;
+    border: solid #1e1e1e;
+}
+
+Composer:focus-within {
+    border: solid #333333;
+}
+
+#prompt-mark {
+    width: 3;
+    padding: 0 1;
+    color: #c9a4ff;
+    background: #000000;
+}
+
+PromptInput {
+    width: 1fr;
+    height: 1fr;
+    background: #000000;
+    border: none;
+    padding: 0;
+    scrollbar-size: 0 0;
+}
+
+#model-badge {
+    width: auto;
+    padding: 0 1;
+    color: #5a5a5a;
+    background: #000000;
+    content-align: right middle;
+}
+
+/* ── autocomplete ─────────────────────────────────────────────────── */
+
+#completion-bar {
+    height: auto;
+    max-height: 8;
+    background: #0a0a0a;
+    border: solid #1e1e1e;
+    padding: 0 1;
+}
+
+#completion-body {
+    color: #7a7a7a;
+    background: #0a0a0a;
+}
+
+/* ── model picker modal ───────────────────────────────────────────── */
+
+ModelScreen {
+    align: center middle;
+    background: #000000 70%;
+}
+
+#model-dialog {
+    width: 52;
+    height: auto;
+    max-height: 16;
+    padding: 1 2;
+    background: #0a0a0a;
+    border: solid #333333;
+}
+
+#model-title {
+    padding: 0 0 1 0;
+    color: #e8e8e8;
+}
+
+#model-list {
+    height: auto;
+    max-height: 8;
+    background: #0a0a0a;
+    border: none;
+    scrollbar-size: 0 0;
+}
+
+#model-list > ListItem {
+    padding: 0 1;
+    background: #0a0a0a;
+    color: #9a9a9a;
+}
+
+#model-list > ListItem.-highlight {
+    background: #0a0a0a;
+    color: #c9a4ff;
+    text-style: none;
+}
+
+#model-key {
+    background: #0a0a0a;
+    color: #e8e8e8;
+    border: solid #1e1e1e;
+}
+
+#model-key:focus {
+    border: solid #333333;
+}
+
+#model-hint {
+    padding: 1 0 0 0;
+    color: #5a5a5a;
+}
+
+/* ── status ───────────────────────────────────────────────────────── */
+
+#status-bar {
+    height: 1;
+    padding: 0 1;
+    background: #000000;
+    color: #5a5a5a;
+}
+
+/* ── transcript blocks ────────────────────────────────────────────── */
+
+.user-block {
+    padding: 1 0 0 0;
+    color: #e8e8e8;
+}
+
+.assistant-block {
+    padding: 0 0 1 0;
+    color: #b4b4b4;
+}
+
+.tool-line {
+    padding: 0 0 0 2;
+    color: #6a6a6a;
+}
+
+.tool-error {
+    color: #a05050;
+}
+
+.tool-output {
+    padding: 0 0 0 2;
+    height: auto;
+    color: #6a6a6a;
+}
+
+.notice-block {
+    padding: 0 0 1 0;
+    color: #5a5a5a;
+}

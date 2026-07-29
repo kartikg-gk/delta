@@ -219,6 +219,9 @@ class SessionCatalog:
             except (json.JSONDecodeError, Exception):  # noqa: BLE001
                 continue
             existing = result.get(meta.session_id)
-            if existing is None or meta.updated_at > existing.updated_at:
+            # The file is append-ordered, so on an equal timestamp the later
+            # line is the newer write. Coarse clocks (Windows ~15ms) tie often
+            # enough that a strict `>` silently discards fresh updates.
+            if existing is None or meta.updated_at >= existing.updated_at:
                 result[meta.session_id] = meta
         return result

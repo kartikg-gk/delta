@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.metadata
+import importlib.util
 import os
 import signal
 import sys
@@ -27,18 +28,9 @@ from typing import TYPE_CHECKING, NoReturn, TextIO
 if TYPE_CHECKING:
     from delta_app.conversation import CodingSession
 
-from delta_harness.contracts.stream import (
-    AgentEvent,
-    MessageEndEvent,
-    MessageUpdateEvent,
-    ToolRunEndEvent,
-    ToolRunStartEvent,
-)
-from delta_harness.contracts.tooling import ToolSpec
-from delta_harness.contracts.transcript import (
-    ModelEntry,
-    surface_text,
-)
+from delta_harness.contracts.stream import AgentEvent
+from delta_harness.contracts.tooling import ToolOutcome, ToolSpec
+from delta_harness.contracts.transcript import CallBlock, surface_text
 from delta_harness.harness import RuntimeHarness
 from delta_harness.provider.base import ModelProvider
 from delta_harness.session.index import SessionCatalog
@@ -49,14 +41,25 @@ from delta_harness.session.records import (
 )
 from delta_harness.session.store import JsonlVault
 
+from delta_app.safety import (
+    ApprovalContext,
+    ApprovalDecision,
+    ApprovalManager,
+    ApprovalPolicy,
+    clean_tool_result,
+    mark_untrusted,
+)
+from delta_app.ui.render import OutputMode, make_renderer
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 _PACKAGE = "delta"
-_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+_DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
+_DEFAULT_OPENAI_MODEL = "gpt-5"
 _DEFAULT_SYSTEM = "You are a helpful coding assistant."
-_SUBCOMMANDS = frozenset({"provider", "session"})
+_SUBCOMMANDS = frozenset({"config", "provider", "session", "tui"})
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +156,10 @@ def _build_run_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-session", action="store_true", help="Disable session persistence.",
     )
+    p.add_argument(
+        "--repl", action="store_true",
+        help="Use the line-based REPL instead of the Textual UI.",
+    )
     return p
 
 
@@ -198,21 +205,21 @@ def _resolve_provider(name: str | None) -> ModelProvider:
 
 
 def _resolve_provider_name(explicit: str | None) -> str:
-    """Best-effort provider name for session metadata (mirrors config detection)."""
+    """Provider name from the flag, then ``DELTA_PROVIDER``, then saved config."""
     if explicit:
         return explicit.strip().lower()
-    env = os.environ.get("DELTA_PROVIDER")
-    if env:
-        return env.strip().lower()
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.environ.get("OPENAI_API_KEY"):
-        return "openai"
-    return "unknown"
+    from delta_app.config.loader import load_provider
+    return load_provider()
 
 
-def _resolve_model(override: str | None) -> str:
-    return override or os.environ.get("DELTA_MODEL") or _DEFAULT_MODEL
+def _resolve_model(override: str | None, provider_name: str = "anthropic") -> str:
+    """Model from the ``--model`` flag, ``DELTA_MODEL``, or the provider's default."""
+    explicit = override or os.environ.get("DELTA_MODEL")
+    if explicit:
+        return explicit
+    if provider_name == "openai":
+        return _DEFAULT_OPENAI_MODEL
+    return _DEFAULT_ANTHROPIC_MODEL
 
 
 def _resolve_system(
@@ -290,6 +297,41 @@ def _install_hooks(harness: RuntimeHarness, verbose: bool = False) -> None:
             _info("Hooks installed.")
     except (ImportError, AttributeError):
         pass
+
+
+_MUTATING_TOOLS = frozenset({"Write", "Edit", "Bash"})
+
+
+def _approval_context(call: CallBlock) -> ApprovalContext:
+    """Describe a pending tool call for the approval manager."""
+    args = call.arguments
+    command = args.get("command")
+    path = args.get("file_path")
+    return ApprovalContext(
+        tool_name=call.name,
+        is_mutating=call.name in _MUTATING_TOOLS,
+        affected_paths=(str(path),) if isinstance(path, str) else (),
+        command=command if isinstance(command, str) else None,
+    )
+
+
+def _install_safety(harness: RuntimeHarness, policy: ApprovalPolicy) -> None:
+    """Gate tool calls through the approval manager and sanitize their results."""
+    manager = ApprovalManager(policy)
+
+    async def before_tool_call(call: CallBlock) -> tuple[bool, str | None]:
+        decision = await manager.check(_approval_context(call))
+        if decision is ApprovalDecision.APPROVED:
+            return False, None
+        return True, f"Blocked by safety policy ({decision.value}): {call.name}"
+
+    async def after_tool_call(
+        call: CallBlock, result: ToolOutcome, is_error: bool,
+    ) -> tuple[ToolOutcome, bool]:
+        return mark_untrusted(clean_tool_result(result)), is_error
+
+    harness.settings.before_tool_call = before_tool_call
+    harness.settings.after_tool_call = after_tool_call
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +465,36 @@ def _handle_provider(argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _textual_available() -> bool:
+    """Whether the optional ``textual`` extra is importable."""
+    return importlib.util.find_spec("textual") is not None
+
+
+def _handle_tui(ns: argparse.Namespace | None = None) -> int:
+    """Launch the Textual UI over the shared runtime session."""
+    if not _textual_available():
+        _die(
+            "The TUI requires the 'textual' extra.\n"
+            "  Install it with: pip install delta[tui]"
+        )
+    from delta_app.tui.app import run_tui
+    return run_tui(ns)
+
+
+def _should_launch_tui(ns: argparse.Namespace) -> bool:
+    """Whether a bare ``delta`` invocation should open the Textual UI.
+
+    Only plain interactive startup qualifies: a one-shot prompt, print mode,
+    a resumed session, ``--repl``, or a non-terminal stdio all stay on the
+    line-based REPL.
+    """
+    if ns.repl or ns.print_mode or ns.prompt is not None or ns.resume:
+        return False
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return False
+    return _textual_available()
+
+
 def _handle_session(argv: list[str]) -> int:
     ns = _build_session_parser().parse_args(argv)
     session_dir = ns.session_dir or getattr(ns, "sub_session_dir", None)
@@ -444,82 +516,21 @@ def _handle_session(argv: list[str]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _extract_text_delta(event: MessageUpdateEvent) -> str | None:
-    """Pull a text delta from a streaming update, if present."""
-    wire = event.assistant_message_event
-    if wire is None:
-        return None
-    # The wire payload may arrive as a dict (Pydantic coercion) or a model object
-    if isinstance(wire, dict):
-        if wire.get("type") == "text_delta":
-            d = wire.get("delta")
-            return str(d) if d else None
-    elif hasattr(wire, "type") and getattr(wire, "type", None) == "text_delta":
-        d = getattr(wire, "delta", None)
-        return str(d) if d else None
-    return None
-
-
-class _FallbackRenderer:
-    """Minimal stateful event renderer used when the full UI module is unavailable.
-
-    Tracks whether streaming text deltas were emitted so it can fall back to
-    printing the full model text on ``MessageEndEvent`` when no deltas arrived
-    (e.g. with non-streaming providers or the test replay provider).
-    """
-
-    __slots__ = ("_saw_delta",)
-
-    def __init__(self) -> None:
-        self._saw_delta = False
-
-    def __call__(self, event: AgentEvent, *, print_mode: bool) -> None:
-        if isinstance(event, MessageUpdateEvent) and isinstance(event.message, ModelEntry):
-            delta = _extract_text_delta(event)
-            if delta:
-                self._saw_delta = True
-                sys.stdout.write(delta)
-                sys.stdout.flush()
-        elif isinstance(event, MessageEndEvent) and isinstance(event.message, ModelEntry):
-            if not self._saw_delta:
-                text = event.message.text
-                if text:
-                    sys.stdout.write(text)
-                    sys.stdout.flush()
-            self._saw_delta = False
-            if not print_mode:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
-        elif not print_mode:
-            if isinstance(event, ToolRunStartEvent):
-                _info(f"  [{event.tool_name}] running...")
-            elif isinstance(event, ToolRunEndEvent):
-                _info(f"  [{event.tool_name}] {'error' if event.is_error else 'done'}")
-
-
 async def _consume_events(
     events: AsyncIterator[AgentEvent],
     *,
     print_mode: bool,
-) -> None:
-    """Consume the event stream and render output.
+) -> bool:
+    """Consume the event stream and render output, returning overall success.
 
     Persistence, stats, auto-naming, and compaction are handled inside
     ``CodingSession`` (via its harness event subscriber), so this only renders.
     """
-    render = None
-    try:
-        from delta_app.ui.render import render_event  # type: ignore[import-not-found]
-        render = render_event
-    except (ImportError, AttributeError):
-        pass
-    fallback = _FallbackRenderer()
-
+    mode = OutputMode.TEXT if print_mode else OutputMode.TRANSCRIPT
+    renderer = make_renderer(mode)
     async for event in events:
-        if render is not None:
-            render(event)
-        else:
-            fallback(event, print_mode=print_mode)
+        renderer.render(event)
+    return renderer.finish()
 
 
 # ---------------------------------------------------------------------------
@@ -553,11 +564,9 @@ async def _run_one_shot(
 ) -> int:
     """Submit a single prompt and exit."""
     events = session.submit(prompt)
-    await _consume_events(events, print_mode=print_mode)
-    if print_mode:
-        sys.stdout.write("\n")
-        sys.stdout.flush()
-    return 0
+    ok = await _consume_events(events, print_mode=print_mode)
+    sys.stdout.flush()
+    return 0 if ok else 1
 
 
 async def _run_interactive(session: CodingSession) -> int:
@@ -639,13 +648,20 @@ def _wire_signals(session: CodingSession) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _banner(model: str, session_id: str | None, verbose: bool) -> None:
-    parts = [f"Delta v{get_version()}  model={model}"]
+def _banner(provider: str, model: str, session_id: str | None, verbose: bool) -> None:
+    from delta_app.config.store import PROVIDERS
+
+    label = next((p.label for p in PROVIDERS if p.key == provider), provider)
+    parts = [
+        f"Delta v{get_version()}",
+        f"Provider: {label}",
+        f"Model: {model}",
+    ]
     if session_id:
-        parts.append(f"  session: {session_id}")
+        parts.append(f"Session: {session_id}")
     if verbose:
-        parts.append(f"  python:  {sys.version.split()[0]}")
-        parts.append(f"  cwd:     {os.getcwd()}")
+        parts.append(f"Python: {sys.version.split()[0]}")
+        parts.append(f"Cwd: {os.getcwd()}")
     _info("\n".join(parts))
 
 
@@ -656,11 +672,7 @@ def _banner(model: str, session_id: str | None, verbose: bool) -> None:
 
 async def _async_main(ns: argparse.Namespace) -> int:
     """Wire everything together and dispatch to the chosen run mode."""
-    from delta_app.conversation import CodingSession
-
-    model = _resolve_model(ns.model)
-    provider = _resolve_provider(ns.provider)
-    provider_name = _resolve_provider_name(ns.provider)
+    from delta_app.runtime import build_session
 
     # Piped stdin -> one-shot print mode
     if ns.prompt is None and not sys.stdin.isatty():
@@ -672,57 +684,12 @@ async def _async_main(ns: argparse.Namespace) -> int:
     if ns.print_mode and ns.prompt is None:
         _die("Print mode requires a prompt (positional argument or stdin).")
 
-    # --- extensions, tools, skills, system prompt ----------------------
-
-    _load_extensions(verbose=ns.verbose)
-    tools = _load_tools(verbose=ns.verbose)
-    skills = _load_skills(os.getcwd(), verbose=ns.verbose)
-    system = _resolve_system(ns.system_prompt, tools=tools, skills=skills)
-
-    def _tools_loader() -> list[ToolSpec]:
-        return _load_tools()
-
-    # --- session (CodingSession owns persistence/stats/compaction) -----
-
-    sessions_dir = None if ns.no_session else _sessions_dir(ns.session_dir)
-
-    if ns.resume:
-        if sessions_dir is None:
-            _die("Cannot use --resume together with --no-session.")
-        try:
-            session = await CodingSession.resume(
-                ns.resume,
-                provider=provider,
-                provider_name=provider_name,
-                model=model,
-                system=system,
-                tools=tools,
-                sessions_dir=sessions_dir,
-                tools_loader=_tools_loader,
-            )
-        except FileNotFoundError:
-            _die(f"Session not found: {ns.resume}")
-        if ns.verbose:
-            _info(f"Resumed {len(session.transcript)} messages from {ns.resume}")
-    else:
-        session = await CodingSession.create(
-            provider=provider,
-            provider_name=provider_name,
-            model=model,
-            system=system,
-            tools=tools,
-            sessions_dir=sessions_dir,
-            tools_loader=_tools_loader,
-        )
-
-    if ns.max_turns is not None:
-        session.harness.settings.max_turns = ns.max_turns
-
-    _install_hooks(session.harness, verbose=ns.verbose)
+    # Shared construction — identical to the path the TUI uses.
+    session = await build_session(ns)
     _wire_signals(session)
 
     if not ns.print_mode:
-        _banner(model, session.session_id, ns.verbose)
+        _banner(session.provider_name, session.model, session.session_id, ns.verbose)
 
     # --- dispatch ------------------------------------------------------
 
@@ -746,6 +713,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Subcommand dispatch (checked before argparse to avoid positional conflicts)
     if args and args[0] in _SUBCOMMANDS:
         cmd, rest = args[0], args[1:]
+        if cmd == "config":
+            from delta_app.cli.config_cmd import handle_config
+            return handle_config(rest)
+        if cmd == "tui":
+            return _handle_tui(_build_run_parser().parse_args(rest))
         if cmd == "provider":
             return _handle_provider(rest)
         if cmd == "session":
@@ -753,6 +725,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Default: run mode
     ns = _build_run_parser().parse_args(args)
+
+    # A bare interactive `delta` opens the Textual UI. It needs no provider or
+    # session, so this runs before any credential resolution.
+    if _should_launch_tui(ns):
+        return _handle_tui(ns)
+
     try:
         return asyncio.run(_async_main(ns))
     except KeyboardInterrupt:

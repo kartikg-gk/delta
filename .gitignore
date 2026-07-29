@@ -29,3 +29,21 @@ Thumbs.db
 # Sessions / local data
 *.jsonl
 sessions/
+
+# Delta user config (may contain API keys)
+.delta/
+config.toml
+
+# Tests
+tests/
+
+# Build map / docs scratch
+BUILD_MAP.md
+docs/BUILD_MAP.md
+
+# Agent skills and local agent config
+.claude/
+
+# Coverage
+.coverage
+htmlcov/

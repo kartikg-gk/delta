@@ -29,7 +29,7 @@ from delta_harness.contracts.transcript import (
     TranscriptEntry,
 )
 from delta_harness.contracts.values import JValue
-from delta_harness.loop import run_agent_loop
+from delta_harness.loop import PostToolHook, PreToolHook, run_agent_loop
 from delta_harness.provider.base import ModelProvider
 
 # ---------------------------------------------------------------------------
@@ -106,6 +106,8 @@ class RuntimeConfig:
     tools: list[ToolSpec] = field(default_factory=list)
     max_turns: int | None = None
     queue_mode: DrainPolicy = "one_at_a_time"
+    before_tool_call: PreToolHook | None = None
+    after_tool_call: PostToolHook | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +319,8 @@ class RuntimeHarness:
                 signal=token,
                 get_steering_messages=self._pop_steered,
                 get_follow_up_messages=self._pop_followups,
+                before_tool_call=self._cfg.before_tool_call,
+                after_tool_call=self._cfg.after_tool_call,
             ):
                 await self._fan_out(event)
                 yield event

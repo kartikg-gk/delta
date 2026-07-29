@@ -1,1 +1,47 @@
-"""delta context: token budgeting and compaction policy."""
+"""delta context: token budgeting, threshold detection, and compaction planning."""
+
+from delta_app.context.budget import (
+    CHARS_PER_TOKEN,
+    CompactionPlan,
+    CompactionResult,
+    ContextEstimate,
+    ContextLimits,
+    DEFAULT_SUMMARY_SYSTEM,
+    DEFAULT_WINDOW,
+    MODEL_WINDOWS,
+    TOOL_SCHEMA_BASELINE,
+    apply_compaction,
+    build_summary_prompts,
+    estimate_context,
+    estimate_entry_tokens,
+    estimate_system_tokens,
+    estimate_tool_tokens,
+    estimate_transcript_tokens,
+    exceeds_threshold,
+    plan_compaction,
+    resolve_window,
+    serialize_for_summary,
+)
+
+__all__ = [
+    "CHARS_PER_TOKEN",
+    "CompactionPlan",
+    "CompactionResult",
+    "ContextEstimate",
+    "ContextLimits",
+    "DEFAULT_SUMMARY_SYSTEM",
+    "DEFAULT_WINDOW",
+    "MODEL_WINDOWS",
+    "TOOL_SCHEMA_BASELINE",
+    "apply_compaction",
+    "build_summary_prompts",
+    "estimate_context",
+    "estimate_entry_tokens",
+    "estimate_system_tokens",
+    "estimate_tool_tokens",
+    "estimate_transcript_tokens",
+    "exceeds_threshold",
+    "plan_compaction",
+    "resolve_window",
+    "serialize_for_summary",
+]
