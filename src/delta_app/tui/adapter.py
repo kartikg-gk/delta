@@ -171,11 +171,17 @@ class SessionBridge:
         )
 
     def sessions(self) -> list[SessionEntry]:
-        """List every known session, newest first."""
+        """List every known session in a stable order, newest first.
+
+        Ordered by creation time, not last use: sorting by ``updated_at``
+        made the selected session jump to the top of the sidebar every time
+        it was used.
+        """
         catalog = self._session.catalog
         if catalog is None:
             return []
         active = self._session.session_id
+        metas = sorted(catalog.list_all(), key=lambda m: m.created_at, reverse=True)
         return [
             SessionEntry(
                 session_id=meta.session_id,
@@ -183,7 +189,7 @@ class SessionBridge:
                 updated_at=meta.updated_at,
                 is_active=meta.session_id == active,
             )
-            for meta in catalog.list_all()
+            for meta in metas
         ]
 
     # -- actions ------------------------------------------------------------

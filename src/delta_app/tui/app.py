@@ -8,9 +8,11 @@ provider, and executes no tools.
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 from pathlib import Path
 
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.widgets import Footer, Header
@@ -57,7 +59,8 @@ class DeltaApp(App[None]):
     TITLE = "δelta"
 
     BINDINGS = [
-        ("ctrl+c", "cancel", "Cancel / Quit"),
+        ("escape", "stop", "Stop"),
+        ("ctrl+c", "cancel", "Stop / Quit"),
         ("ctrl+n", "new_session", "New session"),
         ("ctrl+q", "quit", "Quit"),
     ]
@@ -66,6 +69,8 @@ class DeltaApp(App[None]):
         super().__init__()
         self._bridge = bridge
         self._busy = False
+        #: Set by Ctrl+C so updates still in flight are not rendered.
+        self._cancelled = False
 
     # -- composition --------------------------------------------------------
 
@@ -153,13 +158,23 @@ class DeltaApp(App[None]):
         self.query_one(TranscriptView).add_user(text)
         self.run_worker(self._stream(text), exclusive=True)
 
+    def action_stop(self) -> bool:
+        """Stop the running generation. Returns whether anything was stopped."""
+        if not self._busy or self._bridge is None:
+            return False
+        self._cancelled = True
+        self._bridge.cancel()
+        transcript = self.query_one(TranscriptView)
+        transcript.finish_assistant(transcript.live_text)
+        transcript.add_notice("Stopped.")
+        self.query_one(PromptInput).focus()
+        self._refresh_status()
+        return True
+
     def action_cancel(self) -> None:
-        """Ctrl+C: cancel an active generation, otherwise quit."""
-        if self._busy and self._bridge is not None:
-            self._bridge.cancel()
-            self.query_one(TranscriptView).add_notice("Cancelled.")
-            return
-        self.exit()
+        """Ctrl+C: stop the generation if running, otherwise quit."""
+        if not self.action_stop():
+            self.exit()
 
     def action_new_session(self) -> None:
         """Ctrl+N: start a fresh session."""
@@ -252,9 +267,14 @@ class DeltaApp(App[None]):
         assert self._bridge is not None
         transcript = self.query_one(TranscriptView)
         self._busy = True
+        self._cancelled = False
         self._refresh_status()
         try:
             async for update in self._bridge.submit(text):
+                if self._cancelled:
+                    # Ctrl+C already closed the block and posted a notice;
+                    # trailing updates must not reopen it.
+                    break
                 if isinstance(update, TextDelta):
                     transcript.stream_delta(update.text)
                 elif isinstance(update, ToolStarted):
@@ -272,9 +292,11 @@ class DeltaApp(App[None]):
             transcript.add_notice(str(exc), error=True)
         finally:
             self._busy = False
-            # Auto-naming and ordering change after a turn, so repaint the list.
-            await self._refresh_sidebar()
-            self._refresh_status()
+            # The app may be tearing down (quit during generation), in which
+            # case these widgets are already gone.
+            with suppress(NoMatches):
+                await self._refresh_sidebar()
+                self._refresh_status()
 
     def _refresh_status(self) -> None:
         """Update the footer readout and the composer's model/effort badge."""

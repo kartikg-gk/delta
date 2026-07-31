@@ -65,6 +65,11 @@ class TranscriptView(VerticalScroll):
         self._live.append(delta)
         self._scroll()
 
+    @property
+    def live_text(self) -> str:
+        """Text streamed into the open assistant block so far."""
+        return self._live.text if self._live is not None else ""
+
     def finish_assistant(self, text: str) -> None:
         """Close the live assistant block."""
         if self._live is None:

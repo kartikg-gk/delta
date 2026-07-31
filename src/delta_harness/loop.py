@@ -327,6 +327,18 @@ async def run_agent_loop(
     while True:
         has_calls = True
         while has_calls or pending_steering:
+            # A cancelled run must not begin a *further* turn. The provider
+            # stops mid-stream on its own, but a partial reply often carries
+            # stop_reason="stop", which would otherwise look like a normal
+            # turn and send the loop round again.
+            #
+            # The first turn is always allowed to proceed: `_execute_calls`
+            # emits "aborted" outcomes for pending tool calls, and skipping it
+            # would leave dangling tool calls that providers reject.
+            if not first and signal is not None and signal.is_cancelled():
+                yield RunEndEvent(messages=emitted)
+                return
+
             if not first:
                 yield TurnStartEvent()
             first = False

@@ -56,6 +56,9 @@ class Sidebar(Vertical):
         #: Session ids currently rendered, in order — used to decide whether a
         #: refresh can update in place instead of rebuilding.
         self._ids: list[str] = []
+        #: Active session id at the last repaint, so the cursor only moves
+        #: when the active session actually changes.
+        self._active: str | None = None
 
     def compose(self) -> ComposeResult:
         yield Label("Sessions", id="sidebar-title")
@@ -70,9 +73,15 @@ class Sidebar(Vertical):
         """
         listing = self.query_one(SessionList)
         ids = [e.session_id for e in entries]
+        active = next((e.session_id for e in entries if e.is_active), None)
 
         if ids == self._ids:
             self._restyle(listing, entries)
+            # Follow the active session, but only when it actually changed —
+            # otherwise the cursor would be yanked back on every repaint.
+            if active != self._active:
+                self._active = active
+                listing.index = self._active_index(entries)
             return
 
         # Membership actually changed — rebuild. clear() removes children
@@ -84,6 +93,7 @@ class Sidebar(Vertical):
                 SessionItem(self._label_for(entry), entry.session_id)
             )
         self._ids = ids
+        self._active = active
         self._restyle(listing, entries)
         listing.index = self._active_index(entries)
 

@@ -30,8 +30,10 @@ class StatusBar(Static):
         if snapshot.branch:
             parts.append(f"⎇ {snapshot.branch}")
         if busy:
-            parts.append("generating… ^C cancels")
+            parts.append("■ generating — press Esc to stop")
         self._line = "  ·  ".join(parts)
+        # Highlight the whole bar while a generation can be stopped.
+        self.set_class(busy, "busy")
         self.update(self._line)
 
 

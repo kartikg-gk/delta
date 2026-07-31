@@ -202,6 +202,11 @@ ModelScreen {
     color: #5a5a5a;
 }
 
+/* Visible while a generation is running and can be stopped. */
+#status-bar.busy {
+    color: #c9a4ff;
+}
+
 /* ── transcript blocks ────────────────────────────────────────────── */
 
 .user-block {
