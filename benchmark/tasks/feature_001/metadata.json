@@ -1,0 +1,23 @@
+{
+  "id": "feature_001",
+  "title": "Add JSON output to the CLI",
+  "difficulty": "Easy",
+  "tags": [
+    "feature",
+    "cli"
+  ],
+  "capability": "Smallest end-to-end feature: locate the arg parser, add a flag, branch the output path, keep the default intact. Checks the agent doesn't rewrite unrelated rendering code.",
+  "verification": "verify.py shells out to the CLI twice \u2014 with and without the flag \u2014 asserts the JSON parses and the default output is unchanged byte-for-byte.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 600,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

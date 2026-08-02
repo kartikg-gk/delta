@@ -1,7 +1,7 @@
 """delta_harness: the core.
 
 Data contracts (`values`, `transcript`, `tooling`, `stream`), the agent loop
-(`loop`), the stateful harness (`harness`), session persistence (`session/`),
+(`engine`), the stateful harness (`driver`), session persistence (`session/`),
 and the coding conversation (`conversation`). Import the vocabulary from here:
 
     from delta_harness import AgentEvent, ToolSpec, HumanEntry

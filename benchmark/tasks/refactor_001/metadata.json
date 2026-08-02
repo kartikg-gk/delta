@@ -1,0 +1,23 @@
+{
+  "id": "refactor_001",
+  "title": "Collapse duplicated validation logic",
+  "difficulty": "Easy",
+  "tags": [
+    "refactor",
+    "multi-file"
+  ],
+  "capability": "Recognising near-identical-but-not-identical code. The three copies differ in small ways, so a careless extraction silently changes behaviour in one of them.",
+  "verification": "verify.py runs the suite and asserts the duplicated block appears exactly once via an AST-level check.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 600,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

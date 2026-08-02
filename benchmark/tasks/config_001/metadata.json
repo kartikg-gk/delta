@@ -1,0 +1,23 @@
+{
+  "id": "config_001",
+  "title": "Fix the dependency configuration",
+  "difficulty": "Easy",
+  "tags": [
+    "config",
+    "terminal"
+  ],
+  "capability": "Minimal terminal-and-config task. Verifies the agent can read a resolver error and edit a manifest correctly.",
+  "verification": "verify.py installs into a clean virtualenv and asserts both the install and a subsequent import of the package succeed.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 600,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

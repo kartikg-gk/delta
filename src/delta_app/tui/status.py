@@ -24,11 +24,12 @@ class StatusBar(Static):
         parts = [
             snapshot.provider,
             snapshot.model,
-            f"session {snapshot.session_id[:8]}",
             f"ctx {snapshot.context_percent}%",
         ]
         if snapshot.branch:
             parts.append(f"⎇ {snapshot.branch}")
+        if snapshot.plan_mode:
+            parts.append("PLAN")
         if busy:
             parts.append("■ generating — press Esc to stop")
         self._line = "  ·  ".join(parts)

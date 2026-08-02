@@ -49,7 +49,7 @@ def index_by_id(entries: list[SessionRecord]) -> dict[str, SessionRecord]:
 
 
 def trace_to_entry(entries: list[SessionRecord], leaf_id: str) -> list[SessionRecord]:
-    """Walk parent pointers from ``leaf_id`` back to the root and return the path in root-first order."""
+    """Walk parent pointers from ``leaf_id`` to the root, returned root-first."""
     by_id = index_by_id(entries)
     path: list[SessionRecord] = []
     seen: set[str] = set()
@@ -86,6 +86,35 @@ class ProjectedState:
     cwd: str | None = None
 
 
+def _apply_prune(
+    rows: list[tuple[str, TranscriptEntry]],
+    record: PruneRecord,
+) -> list[tuple[str, TranscriptEntry]]:
+    """Replace the rows superseded by *record* with a single summary row.
+
+    The summary takes the **position of the first row it replaces**, so the
+    condensed history stays where it happened chronologically rather than
+    surfacing after the messages that outlived it.
+    """
+    superseded = set(record.replaces_entry_ids)
+    summary = PruneSummaryEntry(summary=record.summary, tokens_before=0)
+
+    kept: list[tuple[str, TranscriptEntry]] = []
+    placed = False
+    for row_id, message in rows:
+        if row_id not in superseded:
+            kept.append((row_id, message))
+            continue
+        if not placed:
+            kept.append((record.id, summary))
+            placed = True
+
+    # A compaction that matched nothing still belongs in the transcript.
+    if not placed:
+        kept.append((record.id, summary))
+    return kept
+
+
 def project_records(records: list[SessionRecord]) -> ProjectedState:
     """Fold an ordered list of session records into live conversation state.
 
@@ -93,17 +122,11 @@ def project_records(records: list[SessionRecord]) -> ProjectedState:
     ``ModelSwapRecord`` / ``ReasoningLevelRecord`` runtime switches, and
     ``TagRecord`` / ``SessionMetaRecord`` metadata.
 
-    Records whose IDs appear in any ``PruneRecord.replaces_entry_ids`` are
-    excluded from the resulting transcript; a ``PruneSummaryEntry`` takes their
-    place.
+    Compactions are applied **in order, as they are encountered**, so a later
+    compaction can supersede an earlier summary just as it supersedes ordinary
+    messages.
     """
-    pruned_ids: set[str] = set()
-    for record in records:
-        if isinstance(record, PruneRecord):
-            pruned_ids.update(record.replaces_entry_ids)
-
-    transcript: list[TranscriptEntry] = []
-    record_ids: list[str] = []
+    rows: list[tuple[str, TranscriptEntry]] = []
     model: str | None = None
     thinking_level: str | None = None
     title: str | None = None
@@ -111,15 +134,9 @@ def project_records(records: list[SessionRecord]) -> ProjectedState:
 
     for record in records:
         if isinstance(record, TranscriptRecord):
-            if record.id not in pruned_ids:
-                transcript.append(record.message)
-                record_ids.append(record.id)
+            rows.append((record.id, record.message))
         elif isinstance(record, PruneRecord):
-            transcript.append(PruneSummaryEntry(
-                summary=record.summary,
-                tokens_before=0,
-            ))
-            record_ids.append(record.id)
+            rows = _apply_prune(rows, record)
         elif isinstance(record, ModelSwapRecord):
             model = record.model
         elif isinstance(record, ReasoningLevelRecord):
@@ -133,8 +150,8 @@ def project_records(records: list[SessionRecord]) -> ProjectedState:
                 cwd = record.cwd
 
     return ProjectedState(
-        transcript=transcript,
-        record_ids=record_ids,
+        transcript=[message for _row_id, message in rows],
+        record_ids=[row_id for row_id, _message in rows],
         model=model,
         thinking_level=thinking_level,
         title=title,
@@ -153,3 +170,28 @@ def find_tip(records: list[SessionRecord]) -> str | None:
         if isinstance(record, TipRecord):
             return record.entry_id
     return None
+
+
+# ---------------------------------------------------------------------------
+# Active-branch projection — the loader entry point
+# ---------------------------------------------------------------------------
+
+
+def project_active_branch(records: list[SessionRecord]) -> ProjectedState:
+    """Project only the active branch of the record tree.
+
+    Locates the newest ``TipRecord``, walks parent pointers back to the root,
+    and projects that path.  Records abandoned by a ``rewind`` are therefore
+    excluded, which a flat replay of the file would wrongly resurrect.
+
+    Falls back to a flat projection when there is no tip (a session that never
+    completed a run) or when the parent chain is unusable, so a damaged log
+    still loads rather than failing outright.
+    """
+    tip = find_tip(records)
+    if tip is None:
+        return project_records(records)
+    try:
+        return project_records(trace_to_entry(records, tip))
+    except TreeIntegrityError:
+        return project_records(records)

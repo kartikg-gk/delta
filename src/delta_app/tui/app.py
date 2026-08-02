@@ -12,9 +12,9 @@ from contextlib import suppress
 from pathlib import Path
 
 from textual.app import App, ComposeResult
-from textual.css.query import NoMatches
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
+from textual.css.query import NoMatches
 from textual.widgets import Footer, Header
 
 from delta_app.tui.adapter import (
@@ -221,6 +221,16 @@ class DeltaApp(App[None]):
         if text in {"/quit", "/exit", "/q"}:
             self.exit()
             return
+        if text.strip() == "/version":
+            from delta_app.cli.main import get_version
+
+            transcript.add_notice(f"Delta v{get_version()}")
+            return
+        if text.strip() in {"/continue", "/resume"}:
+            if self._busy:
+                return
+            self.run_worker(self._stream("", resume=True), exclusive=True)
+            return
         if text.strip() in {"/model", "/provider"}:
             # push_screen_wait requires a worker context.
             self.run_worker(self._open_model_picker())
@@ -262,7 +272,7 @@ class DeltaApp(App[None]):
         transcript.add_notice(summary)
         self._refresh_status()
 
-    async def _stream(self, text: str) -> None:
+    async def _stream(self, text: str, *, resume: bool = False) -> None:
         """Consume the runtime's event stream and render it."""
         assert self._bridge is not None
         transcript = self.query_one(TranscriptView)
@@ -270,7 +280,10 @@ class DeltaApp(App[None]):
         self._cancelled = False
         self._refresh_status()
         try:
-            async for update in self._bridge.submit(text):
+            source = (
+                self._bridge.resume() if resume else self._bridge.submit(text)
+            )
+            async for update in source:
                 if self._cancelled:
                     # Ctrl+C already closed the block and posted a notice;
                     # trailing updates must not reopen it.
@@ -302,7 +315,7 @@ class DeltaApp(App[None]):
         """Update the footer readout and the composer's model/effort badge."""
         if self._bridge is None:
             return
-        from delta_app.thinking import DEFAULT_THINKING_LEVEL
+        from delta_app.reasoning import DEFAULT_THINKING_LEVEL
 
         session = self._bridge.session
         self.query_one(StatusBar).show(self._bridge.status(), busy=self._busy)

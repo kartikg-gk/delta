@@ -1,0 +1,23 @@
+{
+  "id": "terminal_003",
+  "title": "Make the pre-commit hooks pass",
+  "difficulty": "Easy",
+  "tags": [
+    "terminal",
+    "config"
+  ],
+  "capability": "Mechanical but tool-dependent: the agent must actually run the linters to discover the violations rather than eyeballing files.",
+  "verification": "verify.py runs the lint, format-check, and type-check commands and asserts all three exit 0, then asserts no `# type: ignore` or `# noqa` was added.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 600,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

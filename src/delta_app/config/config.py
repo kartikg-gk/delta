@@ -74,7 +74,7 @@ def _detect_provider_name() -> str | None:
 def _build_anthropic(profile: AnthropicProfile) -> ModelProvider:
     """Instantiate an Anthropic adapter from a loaded profile."""
     try:
-        from delta_model.anthropic import AnthropicProvider  # type: ignore[import-not-found]
+        from delta_model.claude import AnthropicProvider  # type: ignore[import-not-found]
     except ImportError:
         raise ConfigError(
             "The 'anthropic' provider requires the httpx extra.\n"
@@ -86,7 +86,7 @@ def _build_anthropic(profile: AnthropicProfile) -> ModelProvider:
 def _build_openai(profile: OpenAIProfile) -> ModelProvider:
     """Instantiate an OpenAI-compatible adapter from a loaded profile."""
     try:
-        from delta_model.openai_compatible import OpenAIProvider  # type: ignore[import-not-found]
+        from delta_model.oai_compatible import OpenAIProvider  # type: ignore[import-not-found]
     except ImportError:
         raise ConfigError(
             "The 'openai' provider requires the httpx extra.\n"

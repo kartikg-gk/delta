@@ -94,7 +94,7 @@ def delta_home() -> Path:
 
     Delegates to ``resources.default_paths().home`` for canonical resolution.
     """
-    from delta_app.resources import default_paths
+    from delta_app.discovery import default_paths
 
     return default_paths().home
 

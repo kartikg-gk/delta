@@ -8,8 +8,8 @@ based on model name and base URL.
 
 Usage::
 
-    from delta_model.settings import load_openai_profile
-    from delta_model.openai_compatible import OpenAIProvider
+    from delta_model.settings import ReasoningPolicy, load_openai_profile
+    from delta_model.oai_compatible import OpenAIProvider
 
     profile = load_openai_profile()
     provider = OpenAIProvider(profile)
@@ -26,11 +26,11 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 
 import httpx
 
 from delta_harness.contracts.tooling import CancelToken, ToolSpec
-
 from delta_harness.contracts.transcript import ModelEntry, TranscriptEntry
 from delta_harness.provider.wire import StreamFaultEvent, WireEvent
 from delta_model._oai.helpers import build_reasoning_extra, pick_endpoint, try_parse_json
@@ -38,10 +38,10 @@ from delta_model._oai.normalize import EventAssembler
 from delta_model._oai.parsers import ChatDecoder, ParseFault, ResponsesDecoder, StreamDecoder
 from delta_model._oai.payloads import build_chat_payload, build_responses_payload
 from delta_model._oai.transport import HttpStreamError, MalformedPayload, open_event_stream
-from delta_model.settings import Credential, OpenAIProfile
+from delta_model.settings import Credential, OpenAIProfile, ReasoningPolicy
 from delta_model.transport.backoff import compute_delay, pause_for_retry
+from delta_model.transport.client import build_async_client
 from delta_model.transport.faults import format_http_error
-from delta_model.transport.http import build_async_client
 
 
 class OpenAIProvider:
@@ -59,6 +59,15 @@ class OpenAIProvider:
         self._client: httpx.AsyncClient = build_async_client(
             timeout=httpx.Timeout(profile.timeout_seconds),
         )
+
+    def set_reasoning(self, policy: ReasoningPolicy) -> None:
+        """Swap the reasoning-effort policy for subsequent requests.
+
+        The profile is frozen, so a replacement is built rather than mutated.
+        This lets a session change thinking depth mid-conversation without
+        tearing down the HTTP client.
+        """
+        self._profile = replace(self._profile, reasoning=policy)
 
     async def close(self) -> None:
         """Release the underlying HTTP client resources."""

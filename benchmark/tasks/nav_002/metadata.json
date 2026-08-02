@@ -1,0 +1,24 @@
+{
+  "id": "nav_002",
+  "title": "Audit every use of a deprecated helper",
+  "difficulty": "Medium",
+  "tags": [
+    "navigation",
+    "multi-file",
+    "refactor"
+  ],
+  "capability": "Exhaustive discovery under adversarial conditions: the helper is also reached via an alias and a dynamic lookup, so grep alone under-reports. Measures recall, not just precision.",
+  "verification": "verify.py compares the produced inventory against a known ground- truth list of call sites, scoring recall and precision; the aliased and dynamic sites must both appear.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 1200,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

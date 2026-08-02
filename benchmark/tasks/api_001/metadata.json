@@ -1,0 +1,24 @@
+{
+  "id": "api_001",
+  "title": "Integrate a third-party API from its spec",
+  "difficulty": "Medium",
+  "tags": [
+    "api",
+    "feature",
+    "docs-driven"
+  ],
+  "capability": "Reading an external contract (OpenAPI document) and writing a typed client against it, including auth and error mapping, with no live service to poke at.",
+  "verification": "verify.py runs tests against a mock server generated from the same spec, asserting correct paths, auth header, and error mapping.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 1200,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

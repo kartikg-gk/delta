@@ -1,0 +1,23 @@
+{
+  "id": "bug_fix_002",
+  "title": "Pagination returns a duplicate row across pages",
+  "difficulty": "Easy",
+  "tags": [
+    "bug-fix",
+    "debugging"
+  ],
+  "capability": "Off-by-one reasoning from a behavioural report rather than a stack trace. The agent has to write or run a reproduction before it can see the fault at all.",
+  "verification": "verify.py runs the full suite including a previously-skipped test `test_pagination_no_overlap`, which the agent must make pass without editing it.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 600,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "terminal_002",
+  "title": "Find the commit that broke the suite",
+  "difficulty": "Hard",
+  "tags": [
+    "terminal",
+    "debugging",
+    "git"
+  ],
+  "capability": "Git archaeology under a bounded budget. Tests whether the agent bisects methodically instead of checking out commits at random or reading every diff.",
+  "verification": "verify.py asserts the suite passes and that the agent's summary names the correct offending commit SHA.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 2400,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

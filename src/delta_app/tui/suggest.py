@@ -25,9 +25,9 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from delta_app.commands import CommandRegistry, SlashCommand
+from delta_app.directives import CommandRegistry, SlashCommand
 from delta_app.prompts import PromptTemplate
-from delta_app.skills import Skill
+from delta_app.skillset import Skill
 
 # ── constants ──────────────────────────────────────────────────────────────
 

@@ -8,7 +8,7 @@ request-body construction, credential management, and retry orchestration.
 Usage::
 
     from delta_model.settings import load_anthropic_profile
-    from delta_model.anthropic import AnthropicProvider
+    from delta_model.claude import AnthropicProvider
 
     profile = load_anthropic_profile()
     provider = AnthropicProvider(profile)
@@ -24,8 +24,8 @@ Usage::
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator, Sequence
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -51,8 +51,8 @@ from delta_model._claude.courier import ApiRejection, relay_sse
 from delta_model._claude.emitter import ResponseMachine
 from delta_model.settings import AnthropicProfile, Credential, ReasoningPolicy
 from delta_model.transport.backoff import compute_delay, pause_for_retry
+from delta_model.transport.client import build_async_client
 from delta_model.transport.faults import format_http_error
-from delta_model.transport.http import build_async_client
 
 _API_VERSION = "2023-06-01"
 
@@ -234,6 +234,15 @@ class AnthropicProvider:
         self._client: httpx.AsyncClient = build_async_client(
             timeout=httpx.Timeout(profile.timeout_seconds),
         )
+
+    def set_reasoning(self, policy: ReasoningPolicy) -> None:
+        """Swap the extended-thinking policy for subsequent requests.
+
+        The profile is frozen, so a replacement is built rather than mutated.
+        This lets a session change thinking depth mid-conversation without
+        tearing down the HTTP client.
+        """
+        self._profile = replace(self._profile, reasoning=policy)
 
     async def close(self) -> None:
         """Release the underlying HTTP client resources."""

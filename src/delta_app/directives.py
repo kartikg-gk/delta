@@ -28,10 +28,9 @@ Usage::
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
-
 
 # ---------------------------------------------------------------------------
 # Session protocol — the only view commands need of a live session
@@ -117,6 +116,10 @@ class CommandResult:
     # ── session metadata ──────────────────────────────────────────────
     name_requested: bool = False
     name_value: str = ""
+
+    # ── plan mode ─────────────────────────────────────────────────────
+    plan_requested: bool = False
+    plan_value: str = ""
 
     # ── compaction ────────────────────────────────────────────────────
     compact_requested: bool = False
@@ -322,6 +325,11 @@ def _cmd_quit(ctx: CommandContext) -> CommandResult:
     return _ok(exit_requested=True)
 
 
+def _cmd_version(ctx: CommandContext) -> CommandResult:
+    """Show the installed version."""
+    return _ok(extras={"version_requested": True})
+
+
 def _cmd_new(ctx: CommandContext) -> CommandResult:
     """Request creation of a fresh session."""
     return _ok("Starting new session.", new_session_requested=True)
@@ -410,6 +418,11 @@ def _cmd_think(ctx: CommandContext) -> CommandResult:
     )
 
 
+def _cmd_plan(ctx: CommandContext) -> CommandResult:
+    """Toggle read-only plan mode, or set it with ``on``/``off``."""
+    return _ok(plan_requested=True, plan_value=ctx.args.strip().lower())
+
+
 def _cmd_compact(ctx: CommandContext) -> CommandResult:
     """Request context compaction."""
     return _ok(compact_requested=True)
@@ -438,10 +451,25 @@ def _cmd_branch(ctx: CommandContext) -> CommandResult:
 
 
 def _cmd_rewind(ctx: CommandContext) -> CommandResult:
-    """Rewind to a previous entry."""
-    if not ctx.args:
-        return _ok("Usage: /rewind <entry-id>")
+    """Rewind to a previous entry, or list the branchable ones."""
     return _ok(rewind_requested=True, rewind_entry_id=ctx.args)
+
+
+def _cmd_branches(ctx: CommandContext) -> CommandResult:
+    """List recorded fork points."""
+    return _ok(extras={"branches_requested": True})
+
+
+def _cmd_create_skill(ctx: CommandContext) -> CommandResult:
+    """Save a new project skill."""
+    if not ctx.args:
+        return _ok("Usage: /create-skill <name> <instructions>")
+    return _ok(extras={"create_skill_requested": True, "create_skill_args": ctx.args})
+
+
+def _cmd_continue(ctx: CommandContext) -> CommandResult:
+    """Resume the agent loop without a new user message."""
+    return _ok(extras={"continue_requested": True})
 
 
 def _cmd_shell(ctx: CommandContext) -> CommandResult:
@@ -524,6 +552,13 @@ def build_default_registry() -> CommandRegistry:
             search_terms=("leave", "close", "stop"),
         ),
         SlashCommand(
+            name="version",
+            description="Show version info",
+            handler=_cmd_version,
+            usage="/version",
+            search_terms=("build", "release"),
+        ),
+        SlashCommand(
             name="new",
             description="Start a new session",
             handler=_cmd_new,
@@ -590,6 +625,13 @@ def build_default_registry() -> CommandRegistry:
             search_terms=("reasoning", "depth"),
         ),
         SlashCommand(
+            name="plan",
+            description="Toggle read-only plan mode",
+            handler=_cmd_plan,
+            usage="/plan [on|off]",
+            search_terms=("planning", "readonly", "research", "propose"),
+        ),
+        SlashCommand(
             name="compact",
             description="Summarise older context",
             handler=_cmd_compact,
@@ -621,10 +663,32 @@ def build_default_registry() -> CommandRegistry:
         ),
         SlashCommand(
             name="rewind",
-            description="Rewind to a prior entry",
+            description="Rewind to a prior entry (no argument lists them)",
             handler=_cmd_rewind,
-            usage="/rewind <entry-id>",
+            usage="/rewind [number]",
             search_terms=("undo", "rollback", "back"),
+        ),
+        SlashCommand(
+            name="branches",
+            description="List fork points",
+            handler=_cmd_branches,
+            usage="/branches",
+            search_terms=("forks", "tree", "history"),
+        ),
+        SlashCommand(
+            name="create-skill",
+            description="Save a new skill",
+            handler=_cmd_create_skill,
+            usage="/create-skill <name> <text>",
+            search_terms=("add", "author", "write"),
+        ),
+        SlashCommand(
+            name="continue",
+            description="Resume the agent loop after a stop",
+            handler=_cmd_continue,
+            usage="/continue",
+            aliases=("cont",),
+            search_terms=("carry", "on", "proceed"),
         ),
         SlashCommand(
             name="shell",

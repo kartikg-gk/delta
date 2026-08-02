@@ -1,0 +1,24 @@
+{
+  "id": "refactor_002",
+  "title": "Break up a god module",
+  "difficulty": "Hard",
+  "tags": [
+    "refactor",
+    "multi-file",
+    "navigation"
+  ],
+  "capability": "Large-scale mechanical change with a hard compatibility constraint. Tests planning, import-cycle avoidance, and the discipline to keep a re-export shim rather than updating every importer.",
+  "verification": "verify.py asserts the suite passes, that every symbol importable from the old path before the change is still importable after, and that no module exceeds a line-count ceiling.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 2400,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

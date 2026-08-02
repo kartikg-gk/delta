@@ -1,0 +1,23 @@
+{
+  "id": "bug_fix_003",
+  "title": "Crash comparing naive and aware datetimes",
+  "difficulty": "Medium",
+  "tags": [
+    "bug-fix",
+    "debugging"
+  ],
+  "capability": "Tracing a runtime TypeError back through two call layers to a data boundary (parsing) rather than patching at the crash site. Rewards agents that fix causes over symptoms.",
+  "verification": "verify.py runs the suite and additionally greps the diff to assert the fix is not a bare try/except around the comparison.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 1200,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

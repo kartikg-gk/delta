@@ -94,10 +94,10 @@ class StatusSnapshot:
 
     provider: str
     model: str
-    session_id: str
     context_used: int
     context_limit: int
     branch: str | None
+    plan_mode: bool = False
 
     @property
     def context_percent(self) -> int:
@@ -164,10 +164,10 @@ class SessionBridge:
         return StatusSnapshot(
             provider=self._session.provider_name,
             model=self._session.model,
-            session_id=self._session.session_id,
             context_used=usage.estimated_context_tokens,
             context_limit=usage.context_limit,
             branch=git_branch(self._session.cwd),
+            plan_mode=self._session.plan_mode,
         )
 
     def sessions(self) -> list[SessionEntry]:
@@ -273,8 +273,22 @@ class SessionBridge:
 
     async def submit(self, text: str) -> AsyncIterator[Update]:
         """Send *text* and yield view-model updates as the runtime streams."""
+        async for update in self._relay(self._session.submit(text)):
+            yield update
+
+    async def resume(self) -> AsyncIterator[Update]:
+        """Continue the agent loop without adding a new user message.
+
+        Used after a stop: the runtime heals any dangling tool calls and
+        picks the turn back up.
+        """
+        async for update in self._relay(self._session.resume_run()):
+            yield update
+
+    async def _relay(self, events: AsyncIterator[AgentEvent]) -> AsyncIterator[Update]:
+        """Translate a runtime event stream into view-model updates."""
         self._streamed = 0
-        async for event in self._session.submit(text):
+        async for event in events:
             update = self._translate(event)
             if update is not None:
                 yield update

@@ -6,7 +6,7 @@ The CLI is a pure orchestrator — all business logic lives in ``delta_harness``
 - argument parsing with implicit ``run`` subcommand
 - provider / model resolution
 - session creation, resumption, listing, and export
-- extension discovery via file-based loading (``delta_app.extensions``)
+- extension discovery via file-based loading (``delta_app.plugins``)
 - startup banner and notices
 - signal handling for graceful shutdown
 - dispatch to interactive or one-shot run mode
@@ -28,19 +28,6 @@ from typing import TYPE_CHECKING, NoReturn, TextIO
 if TYPE_CHECKING:
     from delta_app.conversation import CodingSession
 
-from delta_harness.contracts.stream import AgentEvent
-from delta_harness.contracts.tooling import ToolOutcome, ToolSpec
-from delta_harness.contracts.transcript import CallBlock, surface_text
-from delta_harness.harness import RuntimeHarness
-from delta_harness.provider.base import ModelProvider
-from delta_harness.session.index import SessionCatalog
-from delta_harness.session.records import (
-    SessionMetaRecord,
-    TagRecord,
-    TranscriptRecord,
-)
-from delta_harness.session.store import JsonlVault
-
 from delta_app.safety import (
     ApprovalContext,
     ApprovalDecision,
@@ -50,6 +37,18 @@ from delta_app.safety import (
     mark_untrusted,
 )
 from delta_app.ui.render import OutputMode, make_renderer
+from delta_harness.contracts.stream import AgentEvent
+from delta_harness.contracts.tooling import ToolOutcome, ToolSpec
+from delta_harness.contracts.transcript import CallBlock, surface_text
+from delta_harness.driver import RuntimeHarness
+from delta_harness.provider.base import ModelProvider
+from delta_harness.session.index import SessionCatalog
+from delta_harness.session.records import (
+    SessionMetaRecord,
+    TagRecord,
+    TranscriptRecord,
+)
+from delta_harness.session.store import JsonlVault
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -109,7 +108,7 @@ def _sessions_dir(override: str | None = None) -> Path:
     """
     if override:
         return Path(override)
-    from delta_app.resources import default_paths
+    from delta_app.discovery import default_paths
 
     return default_paths().sessions
 
@@ -268,8 +267,8 @@ def _load_skills(cwd: str, verbose: bool = False) -> list[object]:
     ``~/.agents/skills``, ``~/.delta/skills``.
     """
     try:
-        from delta_app.resources import default_paths, skill_search_paths
-        from delta_app.skills import load_skills
+        from delta_app.discovery import default_paths, skill_search_paths
+        from delta_app.skillset import load_skills
 
         paths = default_paths(project=Path(cwd))
         dirs = skill_search_paths(paths)
@@ -281,6 +280,29 @@ def _load_skills(cwd: str, verbose: bool = False) -> list[object]:
     except (ImportError, AttributeError):
         if verbose:
             _info("Skill module not available; running without skills.")
+        return []
+
+
+def _load_prompt_templates(cwd: str, verbose: bool = False) -> list[object]:
+    """Load markdown prompt templates from all resource directories.
+
+    Same four-level precedence as skills: ``<cwd>/.agents/prompts``,
+    ``<cwd>/.delta/prompts``, ``~/.agents/prompts``, ``~/.delta/prompts``.
+    """
+    try:
+        from delta_app.discovery import default_paths, prompt_search_paths
+        from delta_app.prompts import load_prompt_templates
+
+        paths = default_paths(project=Path(cwd))
+        dirs = prompt_search_paths(paths)
+        templates = load_prompt_templates(dirs)
+        if verbose:
+            searched = ", ".join(str(d) for d in dirs)
+            _info(f"Loaded {len(templates)} prompt template(s) (searched: {searched}).")
+        return list(templates)
+    except (ImportError, AttributeError):
+        if verbose:
+            _info("Prompt template module not available; running without templates.")
         return []
 
 
@@ -342,11 +364,11 @@ def _install_safety(harness: RuntimeHarness, policy: ApprovalPolicy) -> None:
 def _load_extensions(verbose: bool = False) -> list[object]:
     """Discover and activate extensions from the extension directories.
 
-    Uses file-based discovery (``delta_app.extensions``) rather than installed
+    Uses file-based discovery (``delta_app.plugins``) rather than installed
     entry points, so files written after install — including ones the agent
     authors itself — are picked up on the next load or ``/reload``.
     """
-    from delta_app.extensions import load_extensions
+    from delta_app.plugins import load_extensions
 
     result = load_extensions()
 
@@ -538,22 +560,10 @@ async def _consume_events(
 # ---------------------------------------------------------------------------
 
 
-_HELP_TEXT = """Commands:
-  /help              Show this help
-  /quit /exit /q     End the session
-  /version           Show version info
-  /model [name]      Show or switch model
-  /provider [name]   Show or switch provider
-  /think [level]     Set thinking level (off to disable)
-  /compact           Summarise older context
-  /stats             Show token/turn/cost stats
-  /name [title]      Show or set session title
-  /export [fmt]      Export transcript (text/json/jsonl)
-  /branch [summary]  Fork the conversation here
-  /rewind <id>       Rewind to a prior entry
-  /shell <cmd>       Run a shell command
-  /reload            Reload tools/extensions
-  /diag              Dump session diagnostics"""
+#: ``/help`` is rendered from the shared command registry by the session, so
+#: this file keeps no command list of its own to drift out of date. Only the
+#: skill-invocation form, which is not a registered command, is appended.
+_HELP_SUFFIX = "  /skill:<name> [args]      Invoke a skill"
 
 
 async def _run_one_shot(
@@ -589,11 +599,22 @@ async def _run_interactive(session: CodingSession) -> int:
         # CLI-level built-ins
         if text in {"/quit", "/exit", "/q"}:
             break
-        if text == "/help":
-            _info(_HELP_TEXT)
-            continue
         if text == "/version":
             _info(f"Delta v{get_version()}")
+            continue
+
+        # Resuming yields an event stream rather than a string, so it cannot go
+        # through handle_command like the other session commands.
+        if text in {"/continue", "/resume"}:
+            if session.active:
+                _warn("Agent is already running.")
+                continue
+            try:
+                events = session.resume_run()
+            except RuntimeError as exc:
+                _warn(str(exc))
+                continue
+            await _consume_events(events, print_mode=False)
             continue
 
         # Session-level slash commands (/model, /compact, /stats, /export, ...)
@@ -603,6 +624,8 @@ async def _run_interactive(session: CodingSession) -> int:
             _warn(f"Command failed: {exc}")
             continue
         if response is not None:
+            if text == "/help":
+                response = f"{response}\n{_HELP_SUFFIX}"
             _info(response)
             continue
 

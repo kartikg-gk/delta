@@ -29,7 +29,7 @@ from delta_harness.contracts.transcript import (
     TranscriptEntry,
 )
 from delta_harness.contracts.values import JValue
-from delta_harness.loop import PostToolHook, PreToolHook, run_agent_loop
+from delta_harness.engine import PostToolHook, PreToolHook, run_agent_loop
 from delta_harness.provider.base import ModelProvider
 
 # ---------------------------------------------------------------------------

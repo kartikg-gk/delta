@@ -26,16 +26,14 @@ Lifecycle (as used by ``CodingSession``)::
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from delta_harness.contracts.transcript import (
-    CallBlock,
     HumanEntry,
     ModelEntry,
     PruneSummaryEntry,
-    TextSegment,
     ToolOutcomeEntry,
     TranscriptEntry,
     surface_text,
@@ -43,7 +41,6 @@ from delta_harness.contracts.transcript import (
 
 if TYPE_CHECKING:
     from delta_harness.contracts.tooling import ToolSpec
-    from delta_harness.contracts.values import JValue
 
 # ── constants ───────────────────────────────────────────────────────────
 
@@ -260,6 +257,13 @@ def estimate_transcript_tokens(
     return last_input + tail
 
 
+def _has_reported_usage(transcript: Sequence[TranscriptEntry]) -> bool:
+    """Whether any turn carries provider-reported input token counts."""
+    return any(
+        isinstance(entry, ModelEntry) and entry.usage.input > 0 for entry in transcript
+    )
+
+
 def estimate_context(
     transcript: Sequence[TranscriptEntry],
     *,
@@ -284,10 +288,21 @@ def estimate_context(
     sys_tokens = estimate_system_tokens(system, tools)
     msg_tokens = estimate_transcript_tokens(transcript)
 
+    if _has_reported_usage(transcript):
+        # A provider's reported ``input`` count already covers the system
+        # prompt and tool schemas that were sent with that turn, so adding the
+        # local system estimate on top would bill them twice. Keep the reported
+        # total authoritative and derive the message share from it.
+        used = msg_tokens
+        message_tokens = max(0, msg_tokens - sys_tokens)
+    else:
+        used = sys_tokens + msg_tokens
+        message_tokens = msg_tokens
+
     return ContextEstimate(
-        used=sys_tokens + msg_tokens,
+        used=used,
         system=sys_tokens,
-        messages=msg_tokens,
+        messages=message_tokens,
         limit=window,
         threshold=cfg.compaction_threshold,
     )

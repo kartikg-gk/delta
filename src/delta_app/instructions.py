@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from delta_app.skills import Skill, build_skill_index
+from delta_app.skillset import Skill, build_skill_index
 from delta_harness.contracts.tooling import ToolSpec
 
 _AGENTS_FILE = "AGENTS.md"
@@ -38,14 +38,22 @@ hedging."""
 
 
 def _tool_guidelines(tools: Sequence[ToolSpec]) -> str:
-    """Render each tool's ``prompt_snippet``/``prompt_guidelines``, skipping tools with neither."""
+    """Render each tool's ``prompt_snippet``/``prompt_guidelines``, skipping tools with neither.
+
+    A guideline repeated by several tools is printed once: duplicated
+    instructions waste context and read as emphasis the author did not intend.
+    """
+    seen: set[str] = set()
     sections: list[str] = []
     for tool in tools:
         parts: list[str] = []
         if tool.prompt_snippet:
             parts.append(tool.prompt_snippet)
-        if tool.prompt_guidelines:
-            parts.extend(f"- {guideline}" for guideline in tool.prompt_guidelines)
+        for guideline in tool.prompt_guidelines:
+            text = guideline.strip()
+            if text and text not in seen:
+                seen.add(text)
+                parts.append(f"- {text}")
         if parts:
             sections.append(f"### {tool.name}\n" + "\n".join(parts))
     if not sections:
@@ -64,7 +72,7 @@ def _agents_md_search_paths(cwd: str) -> list[Path]:
     concatenated into the system prompt so that project-level context
     augments (not replaces) user-level context.
     """
-    from delta_app.resources import default_paths
+    from delta_app.discovery import default_paths
 
     paths = default_paths(project=Path(cwd))
     return [
@@ -116,6 +124,7 @@ def system_prompt(
 ) -> str:
     """Assemble the full system prompt: identity, tool guidance, skills, project context, env."""
     resolved_cwd = cwd or os.getcwd()
+
     sections = [
         _BASE_IDENTITY,
         _tool_guidelines(tools),

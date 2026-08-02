@@ -1,9 +1,10 @@
-"""Lightweight session metadata index backed by an append-only JSONL file.
+"""Lightweight session metadata index backed by a JSONL file.
 
 The ``SessionCatalog`` manages an ``index.jsonl`` that lives alongside the
-per-session vault files.  It stores one ``SessionMeta`` record per line and
-supports deduplication by session id — when duplicate entries exist, the one
-with the newest ``updated_at`` timestamp wins.
+per-session vault files.  It stores one ``SessionMeta`` record per session,
+rewritten in place on update.  Reads still deduplicate by session id — newest
+``updated_at`` wins — so indexes written by earlier append-only builds load
+without migration.
 
 This module knows nothing about ``RuntimeHarness`` or transcript data.  It
 only tracks the metadata needed to list, find, and resume sessions.
@@ -17,7 +18,6 @@ from pathlib import Path
 from time import time
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # ---------------------------------------------------------------------------
 # Serialization model
@@ -93,12 +93,13 @@ _INDEX_FILENAME = "index.jsonl"
 
 
 class SessionCatalog:
-    """Persistent index of session metadata stored as append-only JSONL.
+    """Persistent index of session metadata stored as JSONL.
 
-    Each call to :meth:`upsert` appends a line to ``index.jsonl``.  Reads
-    deduplicate by ``session_id``, keeping the entry with the newest
-    ``updated_at`` timestamp.  Malformed lines are silently skipped so a
-    single bad entry never prevents other sessions from loading.
+    :meth:`upsert` rewrites the file so it carries one line per session.
+    Reads still deduplicate by ``session_id`` — keeping the newest
+    ``updated_at`` — so an index left over from an older append-only build
+    still loads correctly.  Malformed lines are skipped, so one bad entry
+    never hides the remaining sessions.
     """
 
     def __init__(self, sessions_dir: str | Path) -> None:
@@ -142,16 +143,35 @@ class SessionCatalog:
     # ── writes ────────────────────────────────────────────────────────
 
     def upsert(self, meta: SessionMeta) -> None:
-        """Append a metadata entry to the index.
+        """Insert or replace the entry for ``meta.session_id``.
 
-        If an entry with the same ``session_id`` already exists on disk the
-        duplicate is resolved at read time — the entry with the newest
-        ``updated_at`` wins.
+        The index holds exactly one line per session: it is read, updated in
+        memory, and rewritten.  Appending instead would let the file grow
+        without bound, since every resume and every rename writes an entry,
+        and each read parses the whole file.
+
+        The rewrite goes through a temporary file and an atomic replace, so an
+        interrupted write cannot truncate an index that is still needed to find
+        existing sessions.
+
+        A write carrying an older ``updated_at`` than the stored entry is
+        dropped: every caller stamps the current time, so a stale timestamp
+        means another process already recorded something newer.
         """
         self._dir.mkdir(parents=True, exist_ok=True)
-        line = meta.to_wire().model_dump_json(exclude_none=True) + "\n"
-        with self._path.open("a", encoding="utf-8") as fh:
-            fh.write(line)
+        entries = self._load_deduped()
+        current = entries.get(meta.session_id)
+        if current is not None and meta.updated_at < current.updated_at:
+            return
+        entries[meta.session_id] = meta
+
+        payload = "".join(
+            entry.to_wire().model_dump_json(exclude_none=True) + "\n"
+            for entry in sorted(entries.values(), key=lambda m: m.updated_at)
+        )
+        staged = self._path.with_name(f"{self._path.name}.tmp")
+        staged.write_text(payload, encoding="utf-8")
+        staged.replace(self._path)
 
     def touch(self, session_id: str) -> SessionMeta | None:
         """Update the ``updated_at`` timestamp for *session_id*.
@@ -216,7 +236,7 @@ class SessionCatalog:
                 raw = json.loads(stripped)
                 wire = SessionMetaWire.model_validate(raw)
                 meta = _wire_to_meta(wire)
-            except (json.JSONDecodeError, Exception):  # noqa: BLE001
+            except Exception:  # noqa: BLE001 - one bad line must not hide the rest
                 continue
             existing = result.get(meta.session_id)
             # The file is append-ordered, so on an equal timestamp the later

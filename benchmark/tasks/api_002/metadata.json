@@ -1,0 +1,25 @@
+{
+  "id": "api_002",
+  "title": "Migrate off the deprecated SDK",
+  "difficulty": "Hard",
+  "tags": [
+    "api",
+    "refactor",
+    "multi-file",
+    "docs-driven"
+  ],
+  "capability": "Cross-cutting dependency migration where the new API is shaped differently, not just renamed. Requires reading a migration guide and reconciling it against actual usage.",
+  "verification": "verify.py asserts the old package is absent from both imports and the dependency manifest, and that the integration suite passes against a stub of the new API.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 2400,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

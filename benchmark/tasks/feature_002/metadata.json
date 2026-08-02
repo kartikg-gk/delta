@@ -1,0 +1,24 @@
+{
+  "id": "feature_002",
+  "title": "Retry transient failures in the HTTP client",
+  "difficulty": "Medium",
+  "tags": [
+    "feature",
+    "api",
+    "testing"
+  ],
+  "capability": "Implementing a resilience policy correctly: classifying retriable vs terminal errors, honouring Retry-After, and \u2014 critically \u2014 writing tests that don't actually sleep.",
+  "verification": "verify.py runs tests using a stub transport that counts attempts; the whole suite must finish in under 5 seconds, so a real sleep fails the task.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 1200,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

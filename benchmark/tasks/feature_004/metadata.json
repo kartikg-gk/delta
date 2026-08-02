@@ -1,0 +1,24 @@
+{
+  "id": "feature_004",
+  "title": "Add a new resource to the REST API",
+  "difficulty": "Hard",
+  "tags": [
+    "feature",
+    "multi-file",
+    "api"
+  ],
+  "capability": "Full vertical slice across model, storage, serialisation, routing, and tests. The hardest part is discovering the project's existing conventions and matching them rather than inventing new ones.",
+  "verification": "verify.py runs the suite plus a schema check asserting the new routes follow the same error envelope and pagination contract as the existing ones.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 2400,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}

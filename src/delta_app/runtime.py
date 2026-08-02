@@ -28,6 +28,7 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
         _install_hooks,
         _install_safety,
         _load_extensions,
+        _load_prompt_templates,
         _load_skills,
         _load_tools,
         _resolve_model,
@@ -60,6 +61,12 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
     def _tools_loader():
         return _load_tools()
 
+    def _skills_loader():
+        return _load_skills(os.getcwd())
+
+    def _templates_loader():
+        return _load_prompt_templates(os.getcwd())
+
     no_session = getattr(ns, "no_session", False)
     sessions_dir = None if no_session else _sessions_dir(getattr(ns, "session_dir", None))
 
@@ -77,6 +84,8 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
                 tools=tools,
                 sessions_dir=sessions_dir,
                 tools_loader=_tools_loader,
+                skills_loader=_skills_loader,
+                templates_loader=_templates_loader,
             )
         except FileNotFoundError:
             _die(f"Session not found: {resume}")
@@ -91,6 +100,8 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
             tools=tools,
             sessions_dir=sessions_dir,
             tools_loader=_tools_loader,
+            skills_loader=_skills_loader,
+            templates_loader=_templates_loader,
         )
 
     max_turns = getattr(ns, "max_turns", None)
@@ -99,7 +110,27 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
 
     _install_hooks(session.harness, verbose=verbose)
     _install_safety(session.harness, ApprovalPolicy.AUTO)
+    attach_logger(session)
     return session
+
+
+def attach_logger(session: CodingSession) -> None:
+    """Subscribe a ``RunLogger`` to the session's event stream.
+
+    Wired here so every frontend — TUI, REPL, one-shot — logs identically.
+    """
+    from delta_app.logs import RunLogger
+
+    logger = RunLogger.create(
+        session.session_id,
+        provider=session.provider_name,
+        model=session.model,
+        cwd=session.cwd,
+    )
+    if logger is None:
+        return
+    logger.stats_source = lambda: session.usage
+    session.harness.on_event(logger.record_event)
 
 
 def git_branch(cwd: str | None = None) -> str | None:

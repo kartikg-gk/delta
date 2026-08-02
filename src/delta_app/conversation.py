@@ -26,12 +26,26 @@ import asyncio
 import importlib.metadata
 import json
 import os
+import re
 import subprocess
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from time import time
+from typing import Any
 
+from delta_app.context.budget import (
+    DEFAULT_WINDOW,
+    ContextEstimate,
+    ContextLimits,
+    apply_compaction,
+    build_summary_prompts,
+    estimate_context,
+    exceeds_threshold,
+    plan_compaction,
+    resolve_window,
+)
+from delta_app.directives import build_default_registry, parse_command
 from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
@@ -47,7 +61,7 @@ from delta_harness.contracts.transcript import (
     surface_text,
 )
 from delta_harness.contracts.values import JValue
-from delta_harness.harness import (
+from delta_harness.driver import (
     PendingBatch,
     QueueShiftEvent,
     RuntimeConfig,
@@ -69,39 +83,127 @@ from delta_harness.session.records import (
     mint_id,
 )
 from delta_harness.session.replay import (
+    find_tip,
+    project_active_branch,
     project_records,
     trace_to_entry,
 )
 from delta_harness.session.store import JsonlVault
 
-# ── context-window budget constants ────────────────────────────────────────
+# ── context-window budget ──────────────────────────────────────────────────
 
-_MODEL_CONTEXT_LIMITS: dict[str, int] = {
-    "claude-sonnet-4-20250514": 200_000,
-    "claude-opus-4-20250514": 200_000,
-    "claude-opus-4-6": 200_000,
-    "claude-sonnet-4-6": 200_000,
-    "claude-haiku-4-5-20251001": 200_000,
-    "gpt-4o": 128_000,
-    "gpt-4o-mini": 128_000,
-}
-_DEFAULT_CONTEXT_LIMIT = 128_000
-_COMPACTION_RATIO = 0.75
-_MIN_ENTRIES_TO_COMPACT = 6
-_COMPACTION_KEEP_RECENT = 4
+#: Context accounting and compaction policy live in ``delta_app.context.budget``.
+#: The session owns one immutable ``ContextLimits`` and delegates every estimate,
+#: threshold check, and compaction plan to that module.
+_CONTEXT_LIMITS = ContextLimits()
+
+#: The single slash-command catalog. Names, aliases, descriptions, and usage
+#: strings all come from here; the session binds its own handlers to them.
+COMMAND_REGISTRY = build_default_registry()
+
+#: Registry commands a coding session dispatches, plus the ones a frontend runs
+#: on its behalf: ``/continue`` resumes the loop (which yields events, not a
+#: string), and ``/quit`` and ``/version`` belong to the frontend entirely.
+#: They are listed here so completion and ``/help`` describe everything a user
+#: can actually type. Anything outside this set stays in the registry for other
+#: callers but is never offered here.
+_RUNNABLE_COMMANDS: frozenset[str] = frozenset({
+    "branch", "branches", "compact", "continue", "create-skill", "diag",
+    "export", "help", "model", "name", "plan", "provider", "quit", "reload",
+    "rewind", "shell", "skills", "stats", "think", "version",
+})
+
+_RUNNABLE_COMMAND_TABLE: tuple[tuple[str, str], ...] = tuple(
+    (command.name, command.description)
+    for command in COMMAND_REGISTRY.all_commands()
+    if command.name in _RUNNABLE_COMMANDS
+)
 
 _EXTENSION_GROUP = "delta.extensions"
-
-_SUMMARY_SYSTEM = (
-    "You are a concise summarizer. Produce a brief summary of the conversation "
-    "that preserves key decisions, code changes, file paths, and open questions. "
-    "Keep it under 500 words."
-)
 
 _NAMING_SYSTEM = (
     "Generate a short, descriptive title (3-8 words) for this coding conversation. "
     "Return only the title, nothing else."
 )
+
+_EXPORT_FORMATS = ("text", "json", "jsonl")
+_EXPORT_SUFFIX = {"text": "txt", "json": "json", "jsonl": "jsonl"}
+
+
+def parse_export_arg(arg: str) -> tuple[str, str | None]:
+    """Split ``/export`` arguments into ``(format, destination)``.
+
+    Accepts a format, a path, or both in either order::
+
+        ""                     -> ("text", None)
+        "json"                 -> ("json",  None)
+        "out.json"             -> ("json",  "out.json")     # inferred
+        "json ~/notes/a.json"  -> ("json",  "~/notes/a.json")
+        "./exports/"           -> ("text",  "./exports/")
+    """
+    parts = arg.split()
+    if not parts:
+        return "text", None
+
+    if parts[0].lower() in _EXPORT_FORMATS:
+        fmt = parts[0].lower()
+        rest = " ".join(parts[1:]).strip()
+        return fmt, rest or None
+
+    destination = arg.strip()
+
+    # A lone bare word with no separator and no extension is a mistyped
+    # format, not a path — returning it as the format lets the caller reject
+    # it instead of silently creating a junk file.
+    if (
+        len(parts) == 1
+        and not Path(destination).suffix
+        and not any(sep in destination for sep in ("/", "\\", "~", "."))
+    ):
+        return destination.lower(), None
+
+    # Otherwise infer the format from the file extension.
+    suffix = Path(destination).suffix.lstrip(".").lower()
+    for name, ext in _EXPORT_SUFFIX.items():
+        if suffix == ext:
+            return name, destination
+    return "text", destination
+
+
+_SKILL_NAME_RE = re.compile(r"\A[a-z0-9][a-z0-9._-]*\Z", re.IGNORECASE)
+_SKILL_DESC_MAX = 100
+
+
+def parse_create_skill_arg(arg: str) -> tuple[str, str]:
+    """Split ``/create-skill`` arguments into ``(name, body)``.
+
+    The first whitespace-delimited token is the skill name; everything after
+    it — including newlines — is the body.
+    """
+    stripped = arg.strip()
+    if not stripped:
+        return "", ""
+    parts = stripped.split(None, 1)
+    name = parts[0]
+    body = parts[1].strip() if len(parts) > 1 else ""
+    return name, body
+
+
+def derive_skill_description(body: str) -> str:
+    """Use the first non-empty line of *body* as the skill description."""
+    for line in body.splitlines():
+        line = line.strip().lstrip("#").strip()
+        if line:
+            return line[:_SKILL_DESC_MAX]
+    return ""
+
+
+def render_skill_file(name: str, description: str, body: str) -> str:
+    """Render a ``SKILL.md`` with front matter."""
+    return (
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{body.rstrip()}\n"
+    )
+
 
 _TITLE_MAX_CHARS = 48
 
@@ -133,6 +235,133 @@ def summarize_prompt(text: str, *, limit: int = _TITLE_MAX_CHARS) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class SessionTreeChoice:
+    """One branchable entry in the active session tree."""
+
+    entry_id: str
+    label: str
+    active: bool = False
+    is_tool_call: bool = False
+
+
+def _short_preview(text: str, *, limit: int = 72) -> str:
+    """Collapse whitespace and clip *text* for single-line display."""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized or "(empty)"
+    return f"{normalized[: limit - 1]}..."
+
+
+def _tree_entry_title(record: SessionRecord) -> str:
+    """Human-readable one-line title for a tree row."""
+    match record.type:
+        case "message":
+            message = record.message
+            if (
+                isinstance(message, ModelEntry)
+                and message.tool_calls
+                and not message.text.strip()
+            ):
+                names = ", ".join(call.name for call in message.tool_calls)
+                return f"tool call: {names}"
+            return f"{message.role}: {_short_preview(surface_text(message))}"
+        case "compaction":
+            return f"compaction summary: {_short_preview(record.summary)}"
+        case "branch_summary":
+            return f"branch summary: {_short_preview(record.summary)}"
+        case _:
+            return record.type
+
+
+def _is_branchable_record(record: SessionRecord) -> bool:
+    """Whether a rewind/branch may target *record*."""
+    if record.type in {"compaction", "branch_summary"}:
+        return True
+    if record.type != "message":
+        return False
+    return isinstance(record.message, HumanEntry | ModelEntry)
+
+
+def _is_tool_call_record(record: SessionRecord) -> bool:
+    """Whether *record* holds an assistant turn that requested tools."""
+    return (
+        record.type == "message"
+        and isinstance(record.message, ModelEntry)
+        and bool(record.message.tool_calls)
+    )
+
+
+def _ordered_tree_records(records: list[SessionRecord]) -> tuple[SessionRecord, ...]:
+    """Depth-first ordering of the record tree, roots first.
+
+    Pointer (``leaf``) records are skipped — they mark the head rather than
+    forming part of the conversation. Orphans whose parent is missing are
+    appended after the connected tree so nothing is silently dropped.
+    """
+    children: dict[str | None, list[SessionRecord]] = {}
+    for record in records:
+        if record.type != "leaf":
+            children.setdefault(record.parent_id, []).append(record)
+
+    ordered: list[SessionRecord] = []
+    seen: set[str] = set()
+    expanded: set[str | None] = set()
+
+    def walk(root_parent_id: str | None) -> None:
+        stack: list[str | None] = [root_parent_id]
+        while stack:
+            parent_id = stack.pop()
+            if parent_id in expanded:
+                continue
+            expanded.add(parent_id)
+            kids = children.get(parent_id, [])
+            for child in kids:
+                if child.id not in seen:
+                    ordered.append(child)
+                    seen.add(child.id)
+            for child in reversed(kids):
+                stack.append(child.id)
+
+    walk(None)
+    for record in records:
+        if record.type != "leaf" and record.id not in seen:
+            ordered.append(record)
+            seen.add(record.id)
+            walk(record.id)
+    return tuple(ordered)
+
+
+def _tree_branch_indents(records: list[SessionRecord]) -> dict[str, int]:
+    """Indent depth per record: only forks (2nd+ sibling) add a level."""
+    children: dict[str | None, list[str]] = {}
+    for record in records:
+        if record.type != "leaf":
+            children.setdefault(record.parent_id, []).append(record.id)
+
+    sibling_index = {
+        child_id: index
+        for kids in children.values()
+        for index, child_id in enumerate(kids)
+    }
+    indents: dict[str, int] = {}
+    for record in records:
+        if record.type == "leaf":
+            continue
+        parent_indent = (
+            indents.get(record.parent_id, 0) if record.parent_id is not None else 0
+        )
+        indents[record.id] = parent_indent + (
+            1 if sibling_index.get(record.id, 0) > 0 else 0
+        )
+    return indents
+
+
+def _tree_choice_label(record: SessionRecord, *, branch_indent: int = 0) -> str:
+    """Indented display label for one tree row."""
+    return f"{'  ' * branch_indent}{_tree_entry_title(record)}"
+
+
+@dataclass(frozen=True, slots=True)
 class SessionStats:
     """Cumulative usage statistics for a coding session."""
 
@@ -142,7 +371,7 @@ class SessionStats:
     total_output_tokens: int = 0
     total_cost_usd: float = 0.0
     estimated_context_tokens: int = 0
-    context_limit: int = _DEFAULT_CONTEXT_LIMIT
+    context_limit: int = DEFAULT_WINDOW
 
 
 # ── main class ─────────────────────────────────────────────────────────────
@@ -169,10 +398,13 @@ class CodingSession:
         tools: list[ToolSpec],
         transcript: list[TranscriptEntry] | None = None,
         record_ids: list[str] | None = None,
+        tip_id: str | None = None,
         title: str | None = None,
         thinking_level: str | None = None,
         cwd: str | None = None,
         tools_loader: Callable[[], list[ToolSpec]] | None = None,
+        skills_loader: Callable[[], list[Any]] | None = None,
+        templates_loader: Callable[[], list[Any]] | None = None,
     ) -> None:
         self._session_id = session_id
         self._vault = vault
@@ -185,12 +417,28 @@ class CodingSession:
         self._thinking_level = thinking_level
         self._cwd = cwd or os.getcwd()
         self._record_ids: list[str] = list(record_ids) if record_ids else []
-        self._tip_id: str | None = self._record_ids[-1] if self._record_ids else None
+        # The tip is the head of the active branch. It is not always the last
+        # transcript record — metadata records (title, model, prune) also chain
+        # onto it — so callers pass it explicitly when known.
+        self._tip_id: str | None = tip_id or (
+            self._record_ids[-1] if self._record_ids else None
+        )
         self._extensions: list[object] = []
         self._named = title is not None
         self._named_at = 0
         self._renamed_manually = False
         self._tools_loader = tools_loader
+        self._skills_loader = skills_loader
+        self._skills: list[Any] = list(skills_loader() if skills_loader else [])
+        self._templates_loader = templates_loader
+        self._templates: list[Any] = list(
+            templates_loader() if templates_loader else []
+        )
+        # Unrestricted tool set. Plan mode narrows what the harness sees, so
+        # the full list is kept here to restore from and to hand to new
+        # sessions.
+        self._all_tools: list[ToolSpec] = list(tools)
+        self._plan_mode = False
 
         # Cumulative stats
         self._turn_count = 0
@@ -209,6 +457,10 @@ class CodingSession:
 
       
         self._unsubscribe = self._harness.on_event(self._on_harness_event)
+
+        # A resumed session restores its thinking level from the record log;
+        # apply it so the first request matches what the transcript claims.
+        self._apply_thinking_level()
 
         
         if transcript:
@@ -234,15 +486,22 @@ class CodingSession:
         session_id: str | None = None,
         cwd: str | None = None,
         tools_loader: Callable[[], list[ToolSpec]] | None = None,
+        skills_loader: Callable[[], list[Any]] | None = None,
+        templates_loader: Callable[[], list[Any]] | None = None,
     ) -> CodingSession:
         """Create a new coding session with optional persistence."""
         sid = session_id or mint_id()[:12]
         vault: JsonlVault | None = None
         catalog: SessionCatalog | None = None
+        root_id: str | None = None
         effective_cwd = cwd or os.getcwd()
         if sessions_dir is not None:
             vault = JsonlVault(sessions_dir / f"{sid}.jsonl")
-            await vault.append(SessionMetaRecord(cwd=effective_cwd))
+            # The metadata record is the tree root; everything else descends
+            # from it so a parent-chain walk always reaches session cwd/title.
+            meta = SessionMetaRecord(cwd=effective_cwd)
+            await vault.append(meta)
+            root_id = meta.id
             catalog = SessionCatalog(sessions_dir)
             catalog.upsert(
                 SessionCatalog.prepare(
@@ -262,8 +521,11 @@ class CodingSession:
             model=model,
             system=system,
             tools=tools or [],
+            tip_id=root_id,
             cwd=cwd,
             tools_loader=tools_loader,
+            skills_loader=skills_loader,
+            templates_loader=templates_loader,
         )
 
     @classmethod
@@ -278,6 +540,8 @@ class CodingSession:
         tools: list[ToolSpec] | None = None,
         sessions_dir: Path,
         tools_loader: Callable[[], list[ToolSpec]] | None = None,
+        skills_loader: Callable[[], list[Any]] | None = None,
+        templates_loader: Callable[[], list[Any]] | None = None,
     ) -> CodingSession:
         """Load an existing session from persistent storage."""
         vault = JsonlVault(sessions_dir / f"{session_id}.jsonl")
@@ -285,7 +549,12 @@ class CodingSession:
             raise FileNotFoundError(f"Session not found: {session_id}")
 
         records = await vault.read_all()
-        state = project_records(records)
+        # Reconstruct along the active-leaf path, not raw write order: once a
+        # session has branched, the file also holds records from abandoned
+        # branches. Walking parent pointers from the tip keeps those out, and
+        # a damaged chain degrades to a flat replay rather than failing to load.
+        state = project_active_branch(records)
+        tip_id = find_tip(records)
 
         catalog = SessionCatalog(sessions_dir)
         catalog.touch(session_id)
@@ -301,10 +570,13 @@ class CodingSession:
             tools=tools or [],
             transcript=state.transcript,
             record_ids=state.record_ids,
+            tip_id=tip_id,
             title=state.title,
             thinking_level=state.thinking_level,
             cwd=state.cwd,
             tools_loader=tools_loader,
+            skills_loader=skills_loader,
+            templates_loader=templates_loader,
         )
 
     # ── run lifecycle ──────────────────────────────────────────────────
@@ -320,7 +592,12 @@ class CodingSession:
         # never show a bare id while waiting on the model-generated title.
         if not self._title:
             self.set_provisional_title(text)
-        return self._run_wrapped(self._harness.submit(text))
+        # `/skill:<name>` and `/<template-name>` are expanded into their full
+        # text before reaching the model; the title keeps the short form.
+        # Skills are checked first: their `skill:` prefix cannot collide with a
+        # template name, so the cheaper, unambiguous match goes ahead.
+        prompt = self.expand_skill(text) or self.expand_template(text) or text
+        return self._run_wrapped(self._harness.submit(prompt))
 
     def _should_rename(self, entries: int) -> bool:
         """Whether the title should be regenerated at *entries* messages.
@@ -354,11 +631,10 @@ class CodingSession:
     async def shutdown(self) -> None:
         """Flush pending state and release resources."""
         self._unsubscribe()
-        if self._vault and self._tip_id:
-            try:
-                await self._vault.append(TipRecord(entry_id=self._tip_id))
-            except Exception:  # noqa: BLE001
-                pass
+        if self._tip_id:
+            await self._append_record(
+                TipRecord(entry_id=self._tip_id), advance_tip=False
+            )
 
     # ── mid-run queues ─────────────────────────────────────────────────
 
@@ -385,8 +661,7 @@ class CodingSession:
         """Switch to a different model identifier (takes effect next turn)."""
         self._model = model
         self._harness.settings.model = model
-        if self._vault:
-            await self._vault.append(ModelSwapRecord(model=model))
+        await self._append_record(ModelSwapRecord(model=model))
 
     async def switch_provider(
         self,
@@ -397,6 +672,9 @@ class CodingSession:
         """Replace the active model provider (takes effect next turn)."""
         self._provider = provider
         self._provider_name = provider_name
+        # A fresh provider carries its own configured reasoning policy; the
+        # session's chosen thinking level has to be re-applied on top.
+        self._apply_thinking_level()
         self._harness.settings.provider = provider
         if model:
             await self.switch_model(model)
@@ -406,13 +684,62 @@ class CodingSession:
     async def set_thinking(self, level: str | None) -> None:
         """Set the thinking/reasoning depth level (or disable with ``None``)."""
         self._thinking_level = level
-        if self._vault:
-            await self._vault.append(ReasoningLevelRecord(thinking_level=level))
+        self._apply_thinking_level()
+        await self._append_record(ReasoningLevelRecord(thinking_level=level))
+
+    def _apply_thinking_level(self) -> None:
+        """Push the active thinking level onto the provider.
+
+        Providers hold a frozen reasoning policy chosen when they were built,
+        so without this the level would be recorded and replayed but never
+        actually change a request. Providers that expose no ``set_reasoning``
+        simply keep their configured policy.
+        """
+        setter = getattr(self._provider, "set_reasoning", None)
+        if setter is None:
+            return
+        from delta_app.reasoning import normalize_thinking_level, thinking_to_budget
+        from delta_model.settings import ReasoningPolicy
+
+        if self._thinking_level is None:
+            setter(ReasoningPolicy(enabled=False))
+            return
+        level = normalize_thinking_level(self._thinking_level)
+        setter(
+            ReasoningPolicy(enabled=True, budget_tokens=thinking_to_budget(level))
+        )
 
     @property
     def thinking_level(self) -> str | None:
         """The current thinking/reasoning depth, or ``None`` if disabled."""
         return self._thinking_level
+
+    # ── plan mode ──────────────────────────────────────────────────────
+
+    @property
+    def plan_mode(self) -> bool:
+        """Whether the session is restricted to research-and-propose."""
+        return self._plan_mode
+
+    def set_plan_mode(self, enabled: bool) -> None:
+        """Enter or leave plan mode (takes effect on the next turn).
+
+        Not persisted: plan mode is a stance for the current sitting, so a
+        resumed session always starts able to make changes.
+        """
+        self._plan_mode = enabled
+        self._apply_plan_mode()
+
+    def _apply_plan_mode(self) -> None:
+        """Push the tool set and system prompt matching the current mode."""
+        from delta_app.planning import plan_system_prompt, restrict_tools
+
+        if self._plan_mode:
+            self._harness.settings.tools = restrict_tools(self._all_tools)
+            self._harness.settings.system = plan_system_prompt(self._system)
+        else:
+            self._harness.settings.tools = list(self._all_tools)
+            self._harness.settings.system = self._system
 
     # ── context compaction ─────────────────────────────────────────────
 
@@ -426,45 +753,53 @@ class CodingSession:
         Raises ``ValueError`` if the transcript is too short to compact.
         """
         transcript = list(self._harness.transcript)
-        if len(transcript) < _MIN_ENTRIES_TO_COMPACT:
+        plan = plan_compaction(transcript, self._record_ids, limits=_CONTEXT_LIMITS)
+        if plan is None:
             raise ValueError(
                 f"Transcript has {len(transcript)} entries; "
-                f"need at least {_MIN_ENTRIES_TO_COMPACT} to compact."
+                f"need at least {_CONTEXT_LIMITS.min_entries} to compact."
             )
 
-        keep_count = max(_COMPACTION_KEEP_RECENT, len(transcript) // 4)
-        to_summarize = transcript[:-keep_count]
-        to_keep = transcript[-keep_count:]
-
-        summary_text = await self._generate_summary(to_summarize)
-        tokens_before = self._estimate_context_tokens()
-
-        summary_entry = PruneSummaryEntry(
-            summary=summary_text,
-            tokens_before=tokens_before,
+        # A transcript that was compacted before carries its earlier summary
+        # into this one, so repeated compactions merge rather than stack.
+        system_prompt, user_prompt = build_summary_prompts(
+            plan,
+            system=_CONTEXT_LIMITS.summary_system,
+            max_chars=_CONTEXT_LIMITS.max_summary_chars,
         )
-
-        compacted_record_ids = self._record_ids[: len(to_summarize)]
-        remaining_record_ids = self._record_ids[len(to_summarize) :]
+        summary_text = await self._utility_completion(user_prompt, system_prompt)
 
         prune_record = PruneRecord(
             summary=summary_text,
-            replaces_entry_ids=compacted_record_ids,
+            replaces_entry_ids=list(plan.summarize_ids),
         )
-        if self._vault:
-            await self._vault.append(prune_record)
+        await self._append_record(prune_record)
 
-        new_transcript: list[TranscriptEntry] = [summary_entry, *to_keep]
-        self._harness.set_messages(new_transcript)
-        self._record_ids = [prune_record.id, *remaining_record_ids]
+        result = apply_compaction(
+            plan, summary_text, summary_record_id=prune_record.id
+        )
+        self._harness.set_messages(list(result.transcript))
+        self._record_ids = list(result.record_ids)
 
-        return summary_entry
+        return result.summary_entry
 
     def should_compact(self) -> bool:
         """Return whether automatic compaction is recommended."""
-        estimated = self._estimate_context_tokens()
-        limit = self._context_limit()
-        return estimated > limit * _COMPACTION_RATIO
+        return exceeds_threshold(self.context_estimate())
+
+    def context_estimate(self) -> ContextEstimate:
+        """Full context accounting for the session as it stands.
+
+        Counts the system prompt and tool schemas alongside the transcript, so
+        the utilisation figure reflects everything actually sent to the model.
+        """
+        return estimate_context(
+            self._harness.transcript,
+            system=self._system,
+            tools=self._harness.settings.tools,
+            limits=_CONTEXT_LIMITS,
+            model=self._model,
+        )
 
     # ── automatic session naming ───────────────────────────────────────
 
@@ -494,8 +829,7 @@ class CodingSession:
 
         self._title = title
         self._named = True
-        if self._vault:
-            await self._vault.append(TagRecord(label=title))
+        await self._append_record(TagRecord(label=title))
         self._sync_title_to_catalog(title)
         return title
 
@@ -528,21 +862,14 @@ class CodingSession:
 
     # ── slash-command dispatch ─────────────────────────────────────────
 
+    #: Registry commands this session offers. See ``_RUNNABLE_COMMANDS``.
+    RUNNABLE_COMMANDS: frozenset[str] = _RUNNABLE_COMMANDS
+
     #: Slash commands, with one-line help. Drives autocomplete and /help.
-    COMMANDS: tuple[tuple[str, str], ...] = (
-        ("model", "Show or switch the model"),
-        ("provider", "Show or switch the provider"),
-        ("think", "Set the thinking/effort level"),
-        ("compact", "Summarise older context"),
-        ("stats", "Show token, turn, and cost stats"),
-        ("name", "Show or set the session title"),
-        ("export", "Export the transcript"),
-        ("branch", "Fork the conversation here"),
-        ("rewind", "Rewind to a prior entry"),
-        ("shell", "Run a shell command"),
-        ("reload", "Reload tools and extensions"),
-        ("diag", "Dump session diagnostics"),
-    )
+    #: Derived from the shared registry so the CLI, the TUI, and dispatch all
+    #: read one list — a command cannot be completable but unrunnable, or
+    #: runnable but undiscoverable.
+    COMMANDS: tuple[tuple[str, str], ...] = _RUNNABLE_COMMAND_TABLE
 
     async def handle_command(self, text: str) -> str | None:
         """Handle a ``/``-prefixed command.
@@ -551,36 +878,68 @@ class CodingSession:
         command, or ``None`` if it was not (so the caller can treat it as a
         normal prompt).
         """
-        if not text.startswith("/"):
+        parsed = parse_command(text)
+        if parsed is None:
             return None
 
-        parts = text[1:].split(None, 1)
-        cmd = parts[0].lower() if parts else ""
-        arg = parts[1].strip() if len(parts) > 1 else ""
+        name, arg = parsed
+        # Resolve through the registry so aliases (/m, /fork, /title, /sh …)
+        # reach the same handler as their primary name.
+        command = COMMAND_REGISTRY.get(name)
+        if command is None:
+            return None
 
-        handlers: dict[str, Callable[[str], object]] = {
+        handler = self._command_handlers().get(command.name)
+        if handler is None:
+            # A registered command the session itself does not run (/quit,
+            # /help, pickers). The frontend owns those; returning None lets it
+            # decide rather than sending the text to the model as a prompt.
+            return None
+
+        result = handler(arg)
+        if asyncio.iscoroutine(result):
+            return await result  # type: ignore[misc]
+        return result  # type: ignore[return-value]
+
+    def _command_handlers(self) -> dict[str, Callable[[str], object]]:
+        """Map registry command names to this session's bound handlers."""
+        return {
             "model": self._cmd_model,
             "provider": self._cmd_provider,
             "think": self._cmd_think,
-            "thinking": self._cmd_think,
+            "plan": self._cmd_plan,
             "compact": self._cmd_compact,
             "stats": self._cmd_stats,
             "name": self._cmd_name,
             "export": self._cmd_export,
             "branch": self._cmd_branch,
+            "branches": self._cmd_branches,
             "rewind": self._cmd_rewind,
             "shell": self._cmd_shell,
+            "skills": self._cmd_skills,
+            "create-skill": self._cmd_create_skill,
             "reload": self._cmd_reload,
             "diag": self._cmd_diag,
+            "help": self._cmd_help,
         }
 
-        handler = handlers.get(cmd)
-        if handler is None:
-            return None
-        result = handler(arg)
-        if asyncio.iscoroutine(result):
-            return await result  # type: ignore[misc]
-        return result  # type: ignore[return-value]
+    def _cmd_help(self, _arg: str) -> str:
+        """List every command available here, with usage and aliases.
+
+        Covers frontend-owned commands (``/quit``, ``/version``, ``/continue``)
+        as well as the session's own, so this is the one help text a user sees.
+        """
+        lines = ["Commands:"]
+        for command in COMMAND_REGISTRY.all_commands():
+            if command.name not in _RUNNABLE_COMMANDS:
+                continue
+            aliases = (
+                "  (" + " ".join(f"/{a}" for a in command.aliases) + ")"
+                if command.aliases
+                else ""
+            )
+            lines.append(f"  {command.display_usage:<28}{command.description}{aliases}")
+        return "\n".join(lines)
 
     # ── terminal command execution ─────────────────────────────────────
 
@@ -627,6 +986,30 @@ class CodingSession:
 
     # ── session tree: branching and rewinding ───────────────────────────
 
+    async def tree_choices(self) -> tuple[SessionTreeChoice, ...]:
+        """Return branchable session entries for a tree picker.
+
+        Rows are depth-first over the record tree, indented where a branch
+        diverged, so a caller can render a selectable list instead of asking
+        the user for a raw record id.
+        """
+        if self._vault is None:
+            return ()
+        records = await self._vault.read_all()
+        indents = _tree_branch_indents(records)
+        return tuple(
+            SessionTreeChoice(
+                entry_id=record.id,
+                label=_tree_choice_label(
+                    record, branch_indent=indents.get(record.id, 0)
+                ),
+                active=record.id == self._tip_id,
+                is_tool_call=_is_tool_call_record(record),
+            )
+            for record in _ordered_tree_records(records)
+            if _is_branchable_record(record)
+        )
+
     async def branch(self, summary: str | None = None) -> str:
         """Create a conversation branch from the current point.
 
@@ -647,9 +1030,7 @@ class CodingSession:
             summary=summary.strip(),
             branch_root_id=self._tip_id,
         )
-        if self._vault:
-            await self._vault.append(record)
-        self._tip_id = record.id
+        await self._append_record(record)
         return record.id
 
     async def rewind(self, entry_id: str) -> None:
@@ -676,7 +1057,9 @@ class CodingSession:
         if state.title:
             self._title = state.title
 
-        await self._vault.append(TipRecord(entry_id=entry_id))
+        await self._append_record(
+            TipRecord(entry_id=entry_id), advance_tip=False
+        )
 
     # ── multi-session lifecycle ────────────────────────────────────────
 
@@ -694,9 +1077,11 @@ class CodingSession:
             provider_name=self._provider_name,
             model=self._model,
             system=self._system,
-            tools=list(self._harness.settings.tools),
+            tools=list(self._all_tools),
             sessions_dir=base,
             tools_loader=self._tools_loader,
+            skills_loader=self._skills_loader,
+            templates_loader=self._templates_loader,
         )
 
     async def replace_session(self, session_id: str) -> CodingSession:
@@ -713,9 +1098,11 @@ class CodingSession:
             provider_name=self._provider_name,
             model=self._model,
             system=self._system,
-            tools=list(self._harness.settings.tools),
+            tools=list(self._all_tools),
             sessions_dir=self._vault.path.parent,
             tools_loader=self._tools_loader,
+            skills_loader=self._skills_loader,
+            templates_loader=self._templates_loader,
         )
 
     # ── extensions and hot reload ──────────────────────────────────────
@@ -740,11 +1127,75 @@ class CodingSession:
         return loaded
 
     async def reload(self) -> None:
-        """Hot-reload tools, extensions, and system prompt."""
+        """Hot-reload tools, skills, extensions, and system prompt."""
         self._extensions = self.load_extensions()
         if self._tools_loader:
-            self._harness.settings.tools = self._tools_loader()
-        self._harness.settings.system = self._system
+            self._all_tools = self._tools_loader()
+        self.reload_skills()
+        self._apply_plan_mode()
+
+    # ── skills ─────────────────────────────────────────────────────────
+
+    @property
+    def skills(self) -> tuple[Any, ...]:
+        """Skills currently available to this session."""
+        return tuple(self._skills)
+
+    def get_skill(self, name: str) -> Any | None:
+        """Look up a loaded skill by name, case-insensitively."""
+        wanted = name.strip().lstrip("/").removeprefix("skill:").lower()
+        for skill in self._skills:
+            if skill.name.lower() == wanted:
+                return skill
+        return None
+
+    def reload_skills(self) -> int:
+        """Re-read skills from disk, returning how many are now loaded."""
+        if self._skills_loader is not None:
+            self._skills = list(self._skills_loader())
+        return len(self._skills)
+
+    def expand_skill(self, text: str) -> str | None:
+        """Expand ``/skill:<name> [args]`` into an injectable prompt block.
+
+        Returns ``None`` when *text* is not a skill invocation.
+        """
+        from delta_app.skillset import expand_command
+
+        index = {s.name: s for s in self._skills}
+        try:
+            return expand_command(text, index)
+        except KeyError:
+            return None
+
+    # ── prompt templates ───────────────────────────────────────────────
+
+    @property
+    def prompt_templates(self) -> tuple[Any, ...]:
+        """Markdown prompt templates available to this session."""
+        return tuple(self._templates)
+
+    def reload_prompt_templates(self) -> int:
+        """Re-read prompt templates from disk, returning how many are loaded."""
+        if self._templates_loader is not None:
+            self._templates = list(self._templates_loader())
+        return len(self._templates)
+
+    def expand_template(self, text: str) -> str | None:
+        """Expand ``/<template-name> [args]`` into its rendered body.
+
+        Returns ``None`` when *text* names no loaded template, so a genuine
+        slash command is never swallowed by a same-named template.
+        """
+        from delta_app.prompts import expand_slash_command
+
+        index = {t.name: t for t in self._templates}
+        if not index:
+            return None
+        try:
+            return expand_slash_command(text, index)
+        except KeyError:
+            return None
 
     # ── exports ────────────────────────────────────────────────────────
 
@@ -876,7 +1327,6 @@ class CodingSession:
         record_id = await self._persist_entry(event.message)
         if record_id:
             self._record_ids.append(record_id)
-            self._tip_id = record_id
         if isinstance(event.message, ModelEntry):
             self._turn_count += 1
             self._total_input += event.message.usage.input
@@ -899,11 +1349,10 @@ class CodingSession:
 
     async def _post_run(self) -> None:
         """Housekeeping after a completed agent run."""
-        if self._vault and self._tip_id:
-            try:
-                await self._vault.append(TipRecord(entry_id=self._tip_id))
-            except Exception:  # noqa: BLE001
-                pass
+        if self._tip_id:
+            await self._append_record(
+                TipRecord(entry_id=self._tip_id), advance_tip=False
+            )
 
         # Rename from the model as soon as there is an exchange to summarise,
         # then re-summarise once the conversation has grown enough that the
@@ -919,7 +1368,7 @@ class CodingSession:
 
         if (
             self.should_compact()
-            and len(self._harness.transcript) >= _MIN_ENTRIES_TO_COMPACT
+            and len(self._harness.transcript) >= _CONTEXT_LIMITS.min_entries
         ):
             try:
                 await self.compact()
@@ -928,57 +1377,46 @@ class CodingSession:
 
     # ── internal: persistence ──────────────────────────────────────────
 
-    async def _persist_entry(self, entry: TranscriptEntry) -> str | None:
-        """Append a transcript record to the vault, returning its record ID."""
+    async def _append_record(
+        self,
+        record: SessionRecord,
+        *,
+        advance_tip: bool = True,
+    ) -> str | None:
+        """Chain *record* onto the active branch and persist it.
+
+        Every durable record is linked to the current tip via ``parent_id`` so
+        that resuming can walk the parent chain and replay only the active
+        branch.  ``advance_tip=False`` is for pointer records (``TipRecord``)
+        that mark the head without becoming it.
+        """
         if self._vault is None:
             return None
-        record = TranscriptRecord(message=entry, parent_id=self._tip_id)
+        if record.parent_id is None:
+            record.parent_id = self._tip_id
         try:
             await self._vault.append(record)
-            return record.id
         except Exception:  # noqa: BLE001
             return None
+        if advance_tip:
+            self._tip_id = record.id
+        return record.id
+
+    async def _persist_entry(self, entry: TranscriptEntry) -> str | None:
+        """Append a transcript record to the vault, returning its record ID."""
+        return await self._append_record(TranscriptRecord(message=entry))
 
     # ── internal: token estimation ─────────────────────────────────────
 
     def _estimate_context_tokens(self) -> int:
-        """Estimate the current context size in tokens."""
-        last_input = 0
-        last_idx = -1
-        transcript = self._harness.transcript
-        for i, entry in enumerate(transcript):
-            if isinstance(entry, ModelEntry):
-                last_input = entry.usage.input
-                last_idx = i
-
-        if last_idx < 0:
-            return sum(len(surface_text(e)) // 4 for e in transcript)
-
-        extra = sum(
-            len(surface_text(e)) // 4 for e in transcript[last_idx + 1 :]
-        )
-        return last_input + extra
+        """Estimated tokens currently occupying the context window."""
+        return self.context_estimate().used
 
     def _context_limit(self) -> int:
         """Return the context token limit for the current model."""
-        return _MODEL_CONTEXT_LIMITS.get(self._model, _DEFAULT_CONTEXT_LIMIT)
+        return resolve_window(self._model)
 
     # ── internal: utility completions ──────────────────────────────────
-
-    async def _generate_summary(
-        self, entries: Sequence[TranscriptEntry]
-    ) -> str:
-        """Generate a concise summary of transcript entries using the provider."""
-        text = "\n".join(
-            f"[{entry.role}] {surface_text(entry)}" for entry in entries
-        )
-        if len(text) > 50_000:
-            text = text[:50_000] + "\n[...truncated...]"
-
-        return await self._utility_completion(
-            f"Summarize this conversation:\n\n{text}",
-            _SUMMARY_SYSTEM,
-        )
 
     async def _utility_completion(self, prompt: str, system: str) -> str:
         """Get a simple text completion from the provider for internal use."""
@@ -1017,6 +1455,29 @@ class CodingSession:
         await self.set_thinking(arg.split()[0])
         return f"Thinking set to: {arg.split()[0]}"
 
+    def _cmd_plan(self, arg: str) -> str:
+        """Toggle plan mode, or set it explicitly with ``on``/``off``."""
+        argument = arg.strip().lower()
+        if not argument:
+            enabled = not self._plan_mode
+        elif argument in {"on", "start", "enable"}:
+            enabled = True
+        elif argument in {"off", "stop", "disable", "exit"}:
+            enabled = False
+        else:
+            return f"Unknown argument: {arg!r}. Use /plan [on|off]."
+
+        if enabled is self._plan_mode:
+            return f"Plan mode already {'on' if enabled else 'off'}."
+
+        self.set_plan_mode(enabled)
+        if enabled:
+            return (
+                "Plan mode on — read-only tools, no edits. "
+                "Use /plan off to resume editing."
+            )
+        return "Plan mode off — editing tools restored."
+
     async def _cmd_compact(self, _arg: str) -> str:
         try:
             entry = await self.compact()
@@ -1043,14 +1504,43 @@ class CodingSession:
         self._named = True
         # An explicit name is final — stop auto-renaming over it.
         self._renamed_manually = True
-        if self._vault:
-            await self._vault.append(TagRecord(label=arg))
+        await self._append_record(TagRecord(label=arg))
         self._sync_title_to_catalog(arg)
         return f"Session named: {arg}"
 
     async def _cmd_export(self, arg: str) -> str:
-        fmt = arg or "text"
-        return await self.export(fmt)
+        fmt, destination = parse_export_arg(arg)
+        if fmt not in _EXPORT_FORMATS:
+            valid = ", ".join(sorted(_EXPORT_FORMATS))
+            return f"Unknown format {fmt!r}. Choose one of: {valid}"
+
+        content = await self.export(fmt)
+        if destination is None:
+            return content
+
+        try:
+            path = self.export_to_path(content, destination, fmt)
+        except OSError as exc:
+            return f"Could not write export: {exc}"
+        return f"Exported {fmt} to {path}"
+
+    def export_to_path(self, content: str, destination: str, fmt: str) -> Path:
+        """Write *content* to *destination*, resolving directories and ``~``.
+
+        A destination that is (or ends like) a directory receives a file named
+        after the session; parent directories are created as needed.
+        """
+        target = Path(destination).expanduser()
+        if not target.is_absolute():
+            target = Path(self.cwd) / target
+
+        looks_like_dir = target.is_dir() or destination.endswith(("/", "\\"))
+        if looks_like_dir:
+            target = target / f"{self._session_id}.{_EXPORT_SUFFIX[fmt]}"
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
+        return target
 
     async def _cmd_branch(self, arg: str) -> str:
         summary = arg or None
@@ -1058,13 +1548,49 @@ class CodingSession:
         return f"Branch created: {branch_id}"
 
     async def _cmd_rewind(self, arg: str) -> str:
+        """Rewind by row number from ``/rewind``, or by raw entry id."""
+        choices = await self.tree_choices()
+        if not choices:
+            return "Nothing to rewind to — this session has no stored history."
+
         if not arg:
-            return "Usage: /rewind <entry_id>"
+            return self._render_tree(choices, header="Rewind to which entry?")
+
+        target = arg.strip()
+        if target.isdigit():
+            index = int(target) - 1
+            if not 0 <= index < len(choices):
+                return f"No entry {target}. Run /rewind to list them."
+            target = choices[index].entry_id
+
         try:
-            await self.rewind(arg)
-            return f"Rewound to: {arg}"
+            await self.rewind(target)
         except Exception as exc:  # noqa: BLE001
             return f"Rewind failed: {exc}"
+        return f"Rewound to: {target}"
+
+    async def _cmd_branches(self, _arg: str) -> str:
+        """List fork points recorded in this session."""
+        choices = await self.tree_choices()
+        forks = tuple(c for c in choices if c.label.lstrip().startswith("branch summary:"))
+        if not forks:
+            return "No branches yet. Use /branch to fork the conversation here."
+        return self._render_tree(forks, header="Branches:")
+
+    @staticmethod
+    def _render_tree(
+        choices: tuple[SessionTreeChoice, ...],
+        *,
+        header: str,
+    ) -> str:
+        """Render tree rows as a numbered, selectable list."""
+        lines = [header]
+        for number, choice in enumerate(choices, start=1):
+            marker = "*" if choice.active else " "
+            lines.append(f"{marker}{number:>3}. {choice.label}")
+        lines.append("")
+        lines.append("Pick with /rewind <number>.")
+        return "\n".join(lines)
 
     async def _cmd_shell(self, arg: str) -> str:
         if not arg:
@@ -1072,9 +1598,84 @@ class CodingSession:
         entry = await self.run_shell(arg)
         return f"Exit {entry.exit_code}:\n{entry.output}"
 
+    async def _cmd_create_skill(self, arg: str) -> str:
+        """Write everything after the name into a new project skill."""
+        name, body = parse_create_skill_arg(arg)
+
+        if not name:
+            return (
+                "Usage: /create-skill <name> <instructions>\n"
+                "Everything after the name becomes the skill body "
+                "(Ctrl+J for multi-line)."
+            )
+        if not _SKILL_NAME_RE.match(name):
+            return (
+                f"Invalid skill name {name!r}. Use letters, digits, "
+                "dots, dashes or underscores — no path separators."
+            )
+        if not body:
+            return f"Nothing to save. Add the instructions after '{name}'."
+
+        try:
+            path, existed = self.write_skill(name, body)
+        except OSError as exc:
+            return f"Could not write skill: {exc}"
+
+        count = self.reload_skills()
+        verb = "Updated" if existed else "Created"
+        return (
+            f"{verb} skill '{name}' at {path}\n"
+            f"{count} skill(s) loaded. Invoke it with /skill:{name}"
+        )
+
+    def write_skill(self, name: str, body: str) -> tuple[Path, bool]:
+        """Write ``<cwd>/.delta/skills/<name>/SKILL.md``.
+
+        Returns the path and whether it already existed.
+        """
+        target = Path(self._cwd) / ".delta" / "skills" / name / "SKILL.md"
+        existed = target.exists()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        description = derive_skill_description(body)
+        target.write_text(
+            render_skill_file(name, description, body), encoding="utf-8",
+        )
+        return target, existed
+
     async def _cmd_reload(self, _arg: str) -> str:
         await self.reload()
         return "Reloaded."
+
+    async def _cmd_skills(self, arg: str) -> str:
+        """List loaded skills, show one, or reload them from disk."""
+        argument = arg.strip()
+
+        if argument in {"reload", "refresh"}:
+            count = self.reload_skills()
+            return f"Reloaded {count} skill(s)."
+
+        if argument:
+            skill = self.get_skill(argument)
+            if skill is None:
+                known = ", ".join(s.name for s in self._skills) or "none"
+                return f"Unknown skill {argument!r}. Loaded: {known}"
+            return (
+                f"{skill.name} — {skill.description}\n"
+                f"source: {skill.source}\n\n{skill.body}"
+            )
+
+        if not self._skills:
+            return (
+                "No skills loaded.\n"
+                "Create .delta/skills/<name>/SKILL.md (or .agents/skills/<name>/, "
+                "or the same under ~/), then run /skills reload."
+            )
+        lines = [f"{len(self._skills)} skill(s) loaded:"]
+        for skill in self._skills:
+            lines.append(f"  /skill:{skill.name}  —  {skill.description}")
+        lines.append("")
+        lines.append("Use /skills <name> to view one, /skills reload to re-read.")
+        return "\n".join(lines)
 
     async def _cmd_diag(self, _arg: str) -> str:
         return json.dumps(self.diagnostics(), indent=2)

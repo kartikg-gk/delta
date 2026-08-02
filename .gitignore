@@ -47,3 +47,6 @@ docs/BUILD_MAP.md
 # Coverage
 .coverage
 htmlcov/
+
+# Run logs
+.logs/

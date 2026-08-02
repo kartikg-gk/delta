@@ -12,8 +12,8 @@ from delta_model.settings import (
     load_openai_profile,
 )
 
-from delta_model.anthropic import AnthropicProvider
-from delta_model.openai_compatible import OpenAIProvider
+from delta_model.claude import AnthropicProvider
+from delta_model.oai_compatible import OpenAIProvider
 
 __all__ = [
     "AnthropicProfile",

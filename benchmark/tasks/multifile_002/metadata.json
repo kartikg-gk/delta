@@ -1,0 +1,24 @@
+{
+  "id": "multifile_002",
+  "title": "Thread a new field through every layer",
+  "difficulty": "Medium",
+  "tags": [
+    "multi-file",
+    "feature",
+    "api"
+  ],
+  "capability": "Vertical change through model, migration, serialiser, API, and client. Failure mode is stopping at layer three and declaring victory \u2014 verification catches partial threading.",
+  "verification": "verify.py posts a record through the public API with the new field set, reads it back, and asserts round-trip fidelity end to end.",
+  "prompt_file": "prompt.md",
+  "repo_dir": "repo",
+  "verifier": "verify.py",
+  "timeout_seconds": 1200,
+  "allowed_tools": [
+    "Read",
+    "Write",
+    "Edit",
+    "Bash",
+    "Grep",
+    "Glob"
+  ]
+}
