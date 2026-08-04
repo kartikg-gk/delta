@@ -184,6 +184,12 @@ def _build_session_parser() -> argparse.ArgumentParser:
         "--format", "-f", choices=["jsonl", "json", "text"], default="jsonl",
     )
     exp.add_argument("--session-dir", default=None, dest="sub_session_dir")
+    st = sub.add_parser("stats", help="Print a session's token and cost totals as JSON.")
+    st.add_argument(
+        "session_id", nargs="?", default=None,
+        help="Session ID to summarize (default: the most recent session).",
+    )
+    st.add_argument("--session-dir", default=None, dest="sub_session_dir")
     return p
 
 
@@ -451,6 +457,33 @@ async def _export_session(base: Path, sid: str, fmt: str, out: TextIO) -> None:
                 out.write(f"[{r.message.role}] {surface_text(r.message)}\n\n")
 
 
+def _latest_session_id(base: Path) -> str | None:
+    """Session id of the most recently modified vault file, if any."""
+    if not base.exists():
+        return None
+    files = [p for p in base.glob("*.jsonl") if p.name != "index.jsonl"]
+    if not files:
+        return None
+    return max(files, key=lambda p: p.stat().st_mtime).stem
+
+
+async def _session_stats(base: Path, sid: str | None, out: TextIO) -> None:
+    """Write one JSON object of token and cost totals for a session."""
+    import json
+    from dataclasses import asdict
+
+    from delta_harness.session.summary import summarize_records
+
+    resolved = sid or _latest_session_id(base)
+    if resolved is None:
+        _die("No sessions found.")
+    path = _session_path(base, resolved)
+    if not path.exists():
+        _die(f"Session not found: {resolved}")
+    records = await JsonlVault(path).read_all()
+    out.write(json.dumps(asdict(summarize_records(resolved, records))) + "\n")
+
+
 # ---------------------------------------------------------------------------
 # Provider subcommand
 # ---------------------------------------------------------------------------
@@ -528,6 +561,10 @@ def _handle_session(argv: list[str]) -> int:
 
     if ns.action == "export":
         asyncio.run(_export_session(base, ns.session_id, ns.format, sys.stdout))
+        return 0
+
+    if ns.action == "stats":
+        asyncio.run(_session_stats(base, ns.session_id, sys.stdout))
         return 0
 
     return 1
