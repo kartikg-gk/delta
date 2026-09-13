@@ -9,7 +9,8 @@ No provider classes, network calls, session state, or UI logic lives here.
 
 from __future__ import annotations
 
-from typing import Any, Literal, Sequence
+from collections.abc import Sequence
+from typing import Literal
 
 # ── canonical levels ────────────────────────────────────────────────────
 

@@ -29,7 +29,6 @@ from delta_harness.session.index import SessionCatalog, SessionMeta
 from delta_harness.session.records import SessionRecord, TranscriptRecord
 from delta_harness.session.store import JsonlVault
 
-
 # ---------------------------------------------------------------------------
 # Summary returned by list_sessions
 # ---------------------------------------------------------------------------

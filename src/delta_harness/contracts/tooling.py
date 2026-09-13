@@ -8,11 +8,10 @@ from pydantic import Field, model_validator
 
 from delta_harness.contracts.transcript import (
     ImageSegment,
-    TextSegment,
     StrictModel,
+    TextSegment,
 )
 from delta_harness.contracts.values import JValue
-
 
 Parallelism = Literal["parallel", "sequential"]
 InputShaper = Callable[[object], Mapping[str, JValue]]
@@ -33,7 +32,7 @@ class InvocationPrinter(Protocol):
 class OutcomePresenter(Protocol):
     def __call__(
         self,
-        result: "ToolOutcome",
+        result: ToolOutcome,
         *,
         expanded: bool,
     ) -> str | None: ...
@@ -46,7 +45,7 @@ class RunHandler(Protocol):
         arguments: Mapping[str, JValue],
         signal: CancelToken | None = None,
         on_update: ProgressNotifier | None = None,
-    ) -> Awaitable["ToolOutcome"]: ...
+    ) -> Awaitable[ToolOutcome]: ...
 
 
 class ToolOutcome(StrictModel):

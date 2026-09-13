@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Sequence
 from typing import Protocol
 
-from delta_harness.contracts.tooling import ToolSpec, CancelToken
+from delta_harness.contracts.tooling import CancelToken, ToolSpec
 from delta_harness.contracts.transcript import TranscriptEntry
 from delta_harness.provider.wire import WireEvent
 

@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 
-
-
 class ConfigError(Exception):
     """Raised when provider configuration is invalid or incomplete."""
 

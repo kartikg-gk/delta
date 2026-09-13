@@ -1,6 +1,6 @@
 """Run logging: trajectory, raw events, and stdout captured under ``.logs/``.
 
-Written per session so external tooling (e.g. Harbor) can read a run without
+Written per session so external tooling can read a run without
 touching Delta's internals.  Three artefacts:
 
 - ``trajectory.json`` — ordered, human-readable steps: prompts, replies,
@@ -17,10 +17,11 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from delta_app.refresh import _scrub
 from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
@@ -31,15 +32,13 @@ from delta_harness.contracts.stream import (
 )
 from delta_harness.contracts.transcript import HumanEntry, ModelEntry
 
-from delta_app.refresh import _scrub
-
 _DIR_ENV = "DELTA_LOG_DIR"
 _DISABLE_ENV = "DELTA_NO_LOGS"
 _DEFAULT_DIR = ".logs"
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
 def logs_enabled() -> bool:

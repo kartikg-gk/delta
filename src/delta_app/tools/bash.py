@@ -13,7 +13,6 @@ from collections.abc import Mapping
 from delta_app.tools._shared import (
     CancelToken,
     JValue,
-    Parallelism,
     ProgressNotifier,
     ToolOutcome,
     ToolSpec,

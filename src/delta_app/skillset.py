@@ -21,11 +21,10 @@ Index:  ``build_skill_index``
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Sequence
-
 
 # ── constants ──────────────────────────────────────────────────────────────
 

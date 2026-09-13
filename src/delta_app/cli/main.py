@@ -54,7 +54,7 @@ from delta_harness.session.store import JsonlVault
 # Constants
 # ---------------------------------------------------------------------------
 
-_PACKAGE = "delta"
+_PACKAGE = "deltaa"
 _DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 _DEFAULT_OPENAI_MODEL = "gpt-5"
 _DEFAULT_SYSTEM = "You are a helpful coding assistant."
@@ -126,7 +126,7 @@ def _build_run_parser() -> argparse.ArgumentParser:
     """Build the argument parser for the default run mode."""
     p = argparse.ArgumentParser(
         prog="delta",
-        description="Delta — a small, readable coding-agent harness.",
+        description="Delta - a small, readable coding-agent harness.",
     )
     p.add_argument(
         "--version", "-V", action="version", version=f"delta {get_version()}",
@@ -666,6 +666,17 @@ async def _run_interactive(session: CodingSession) -> int:
             _info(response)
             continue
 
+        # A registered command the session does not run (terminal-UI pickers and
+        # the like) must not reach the model as a prompt.
+        from delta_app.conversation import COMMAND_REGISTRY
+        from delta_app.directives import parse_command
+
+        parsed = parse_command(text)
+        command = COMMAND_REGISTRY.get(parsed[0]) if parsed is not None else None
+        if command is not None:
+            _warn(f"/{command.name.lstrip('/')} is not available in the line REPL.")
+            continue
+
         # Ordinary prompt
         try:
             events = session.submit(text)
@@ -768,6 +779,10 @@ async def _async_main(ns: argparse.Namespace) -> int:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Top-level CLI entry point for Delta."""
+    # Model output is Unicode; a redirected Windows stream defaults to a legacy codepage.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     args = list(argv if argv is not None else sys.argv[1:])
 
     # Subcommand dispatch (checked before argparse to avoid positional conflicts)

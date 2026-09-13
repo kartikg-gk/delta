@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from asyncio import sleep
 
+from delta_harness.contracts.tooling import CancelToken
 from delta_harness.contracts.values import JValue
 from delta_harness.provider.wire import SourceRetryEvent
-from delta_harness.contracts.tooling import CancelToken
 
 RETRY_POLL_SECONDS = 0.05
 RETRY_BASE_DELAY_SECONDS = 0.25

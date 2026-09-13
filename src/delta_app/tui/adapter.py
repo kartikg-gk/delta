@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
+from delta_app.conversation import CodingSession
 from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
@@ -19,8 +20,6 @@ from delta_harness.contracts.stream import (
     ToolRunStartEvent,
 )
 from delta_harness.contracts.transcript import ModelEntry
-
-from delta_app.conversation import CodingSession
 
 # ---------------------------------------------------------------------------
 # View-model updates

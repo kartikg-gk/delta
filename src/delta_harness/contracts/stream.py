@@ -9,11 +9,10 @@ from pydantic import Field
 from delta_harness.contracts.tooling import ToolOutcome
 from delta_harness.contracts.transcript import (
     StrictModel,
-    TranscriptEntry,
     ToolOutcomeEntry,
+    TranscriptEntry,
 )
 from delta_harness.contracts.values import JValue
-
 
 # --- message streaming -----------------------------------------------------
 

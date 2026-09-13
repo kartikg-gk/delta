@@ -15,7 +15,6 @@ import httpx
 from delta_harness.contracts.tooling import CancelToken
 from delta_model._oai.helpers import ServerSentEvent, parse_retry_after
 
-
 # ---------------------------------------------------------------------------
 # Retriable status codes
 # ---------------------------------------------------------------------------

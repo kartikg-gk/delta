@@ -16,7 +16,6 @@ import httpx
 
 from delta_harness.contracts.tooling import CancelToken
 
-
 # ---------------------------------------------------------------------------
 # Retriable status codes
 # ---------------------------------------------------------------------------

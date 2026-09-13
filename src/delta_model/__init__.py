@@ -1,5 +1,7 @@
 """delta client: LLM providers — turn any model into a typed wire-event stream."""
 
+from delta_model.claude import AnthropicProvider
+from delta_model.oai_compatible import OpenAIProvider
 from delta_model.settings import (
     AnthropicProfile,
     ConfigError,
@@ -11,9 +13,6 @@ from delta_model.settings import (
     load_anthropic_profile,
     load_openai_profile,
 )
-
-from delta_model.claude import AnthropicProvider
-from delta_model.oai_compatible import OpenAIProvider
 
 __all__ = [
     "AnthropicProfile",

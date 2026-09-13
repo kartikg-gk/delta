@@ -1,19 +1,38 @@
 [project]
-name = "delta"
-version = "0.0.1"
-description = "A small, readable coding-agent harness, built from scratch for learning."
+name = "deltaa"
+version = "0.1.0"
+description = "A small, readable coding-agent harness."
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Kartik G" }]
+keywords = ["agent", "cli", "coding-agent", "llm", "tui"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+]
 dependencies = [
     "pydantic>=2.7",
+    "httpx>=0.27",
+    "textual>=0.80",
 ]
+
+[project.urls]
+Homepage = "https://github.com/kartikg-gk/delta"
+Repository = "https://github.com/kartikg-gk/delta"
+Issues = "https://github.com/kartikg-gk/delta/issues"
 
 [project.scripts]
 delta = "delta_app.cli.main:main"
 
-[project.optional-dependencies]
-providers = ["httpx>=0.27"]
-tui = ["textual>=0.80"]
+[dependency-groups]
+# Development tools; installed by `uv sync`, never part of the published package.
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -25,8 +44,17 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.sdist]
+# Ship only what a consumer needs.
+include = ["/src/delta_harness", "/src/delta_model", "/src/delta_app", "/README.md", "/LICENSE", "/pyproject.toml"]
+exclude = ["__pycache__", "*.pyc"]
+
 [tool.hatch.build.targets.wheel]
-packages = ["src/delta_harness", "src/delta_model", "src/delta_app", "src/delta_bench"]
+packages = ["src/delta_harness", "src/delta_model", "src/delta_app"]
+
+[tool.hatch.build]
+# Editable installs expose all of src/.
+dev-mode-dirs = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -39,12 +67,11 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+# Test fixtures carry long canned payloads and expected-completion strings.
+"tests/*" = ["E501"]
+
 [tool.mypy]
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
-
-# Harbor is supplied by the benchmark host, not by Delta's own dependencies.
-[[tool.mypy.overrides]]
-module = "harbor.*"
-ignore_missing_imports = true

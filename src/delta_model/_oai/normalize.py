@@ -34,7 +34,6 @@ from delta_harness.provider.wire import (
     StreamOpenEvent,
     WireEvent,
 )
-
 from delta_model._oai.helpers import extract_usage, map_halt_reason, parse_tool_arguments
 from delta_model._oai.parsers import (
     CallArgFragment,

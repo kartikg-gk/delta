@@ -15,8 +15,6 @@ import mimetypes
 from collections.abc import Mapping
 from pathlib import Path
 
-from delta_harness.contracts.transcript import ImageSegment
-
 from delta_app.tools._shared import (
     BINARY_EXTENSIONS,
     IMAGE_EXTENSIONS,
@@ -30,13 +28,12 @@ from delta_app.tools._shared import (
     format_with_line_numbers,
     optional_bool,
     optional_int,
-    optional_str,
     path_lock,
     require_str,
     text_outcome,
-    truncate_output,
     validate_file_path,
 )
+from delta_harness.contracts.transcript import ImageSegment
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Read tool

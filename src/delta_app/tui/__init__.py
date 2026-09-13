@@ -1,1 +1,2 @@
-"""Textual TUI, consumed strictly behind an adapter boundary (CodingSession -> events -> adapter -> widgets). [P12+]"""
+"""Textual TUI, consumed strictly behind an adapter boundary
+(CodingSession -> events -> adapter -> widgets)."""

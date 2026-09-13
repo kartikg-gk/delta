@@ -22,7 +22,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from delta_app.directives import CommandRegistry, SlashCommand
@@ -464,7 +464,12 @@ def _collect_file_refs(
                     category="file",
                 ))
             # Recurse into matching directories
-            if entry.name.lower().startswith(low_prefix[:len(entry.name)].lower()) if file_prefix else True:
+            matches_prefix = (
+                entry.name.lower().startswith(low_prefix[:len(entry.name)].lower())
+                if file_prefix
+                else True
+            )
+            if matches_prefix:
                 _collect_file_refs(
                     entry, base, dir_part + entry.name + "/", "",
                     items, ignored=ignored, max_results=max_results,
