@@ -115,8 +115,12 @@ def extension_dirs(
     dirs.append(Path(override) if override else delta_home() / "extensions")
 
     if include_project:
+        from delta_app.trust import project_inputs_allowed
+
         root = Path(project_dir) if project_dir is not None else Path.cwd()
-        dirs.append(root / ".delta" / "extensions")
+        # Project plugins run as code, so an untrusted folder never gets them.
+        if project_inputs_allowed(root):
+            dirs.append(root / ".delta" / "extensions")
 
     dirs.extend(Path(path) for path in extra)
     return tuple(dirs)

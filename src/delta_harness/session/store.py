@@ -26,6 +26,16 @@ class RecordParseError(ValueError):
     """A JSONL line could not be decoded into a valid session record."""
 
 
+def jsonl_lines(text: str) -> list[str]:
+    r"""Split JSONL text into records on ``\n`` only.
+
+    ``str.splitlines`` also breaks on U+2028, U+2029, U+0085 and other
+    separators that JSON leaves unescaped inside strings, which would cut a
+    record containing pasted text in half and make the file unreadable.
+    """
+    return [line.rstrip("\r") for line in text.split("\n")]
+
+
 def serialize_record(entry: SessionRecord) -> str:
     """Encode a single record to a JSONL line with no None fields."""
     return _RECORD_ADAPTER.dump_json(entry, exclude_none=True).decode() + "\n"
@@ -154,4 +164,4 @@ class JsonlVault:
         """Load all records from disk. A missing file yields an empty list."""
         if not self.path.exists():
             return []
-        return deserialize_records(self.path.read_text(encoding="utf-8").splitlines())
+        return deserialize_records(jsonl_lines(self.path.read_text(encoding="utf-8")))

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from time import time
 
 from delta_app.conversation import CodingSession
 from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
     MessageUpdateEvent,
+    RetryEvent,
     ToolRunEndEvent,
     ToolRunStartEvent,
 )
@@ -60,7 +62,14 @@ class ToolFinished:
     is_error: bool
 
 
-Update = TextDelta | TurnFinished | ToolStarted | ToolFinished
+@dataclass(frozen=True, slots=True)
+class RetryNotice:
+    """A failed attempt is being retried; shown as progress, not as an error."""
+
+    message: str
+
+
+Update = TextDelta | TurnFinished | ToolStarted | ToolFinished | RetryNotice
 
 
 # ---------------------------------------------------------------------------
@@ -181,7 +190,7 @@ class SessionBridge:
             return []
         active = self._session.session_id
         metas = sorted(catalog.list_all(), key=lambda m: m.created_at, reverse=True)
-        return [
+        entries = [
             SessionEntry(
                 session_id=meta.session_id,
                 title=meta.title,
@@ -190,6 +199,14 @@ class SessionBridge:
             )
             for meta in metas
         ]
+        # A new session is only saved once something happens in it; until
+        # then it is still the one being worked in, so it leads the list.
+        if not any(entry.is_active for entry in entries):
+            entries.insert(0, SessionEntry(
+                session_id=active, title=self._session.title,
+                updated_at=time(), is_active=True,
+            ))
+        return entries
 
     # -- actions ------------------------------------------------------------
 
@@ -306,6 +323,8 @@ class SessionBridge:
                 name=event.tool_name,
                 summary=summarize_call(event.tool_name, event.args),
             )
+        if isinstance(event, RetryEvent):
+            return RetryNotice(event.message)
         if isinstance(event, ToolRunEndEvent):
             return ToolFinished(
                 call_id=event.tool_call_id,
@@ -337,6 +356,7 @@ class SessionBridge:
 
 
 __all__ = [
+    "RetryNotice",
     "SessionBridge",
     "SessionEntry",
     "StatusSnapshot",

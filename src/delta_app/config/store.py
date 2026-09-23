@@ -63,6 +63,17 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
         models=("llama3.3", "qwen2.5-coder", "deepseek-r1"),
         needs_key=False,
     ),
+    ProviderInfo(
+        key="huggingface",
+        label="Hugging Face",
+        key_env="HF_TOKEN",
+        base_url="https://router.huggingface.co/v1",
+        models=(
+            "openai/gpt-oss-120b",
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "moonshotai/Kimi-K2-Instruct",
+        ),
+    ),
 )
 
 
@@ -90,6 +101,9 @@ class DeltaConfig:
     model: str | None = None
     api_keys: dict[str, str] = field(default_factory=dict)
     base_urls: dict[str, str] = field(default_factory=dict)
+    # How folders with no saved trust decision are treated: ask, always, never.
+    # Read only from this user-wide file, never from a project.
+    project_trust: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -144,11 +158,13 @@ def load_config() -> DeltaConfig:
 
     provider = data.get("provider")
     model = data.get("model")
+    trust = data.get("project_trust")
     return DeltaConfig(
         provider=provider if isinstance(provider, str) and provider else None,
         model=model if isinstance(model, str) and model else None,
         api_keys=api_keys,
         base_urls=base_urls,
+        project_trust=trust if trust in ("ask", "always", "never") else None,
     )
 
 
@@ -170,6 +186,8 @@ def render_config(config: DeltaConfig) -> str:
         lines.append(f"provider = {_quote(config.provider)}")
     if config.model:
         lines.append(f"model = {_quote(config.model)}")
+    if config.project_trust:
+        lines.append(f"project_trust = {_quote(config.project_trust)}")
 
     names = sorted(set(config.api_keys) | set(config.base_urls))
     for name in names:

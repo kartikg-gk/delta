@@ -79,6 +79,9 @@ async def _run_bash(
     try:
         proc = await asyncio.create_subprocess_shell(
             command,
+            # No terminal input: a command that prompts must fail fast, not
+            # steal the UI's keyboard or hang until the timeout.
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

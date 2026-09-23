@@ -345,7 +345,7 @@ class TestAssistantBlocks:
         assert blocks[1]["input"] == {"city": "NYC"}
 
     def test_thinking_with_signature(self) -> None:
-        entry = ModelEntry(content=[
+        entry = ModelEntry(api="messages", content=[
             ThoughtSegment(thinking="I should think", thinking_signature="sig123"),
             TextSegment(text="Answer"),
         ])
@@ -363,10 +363,17 @@ class TestAssistantBlocks:
         assert len(blocks) == 1
         assert blocks[0]["type"] == "text"
 
-    def test_empty_content_gets_placeholder(self) -> None:
+    def test_empty_content_yields_no_blocks(self) -> None:
         entry = ModelEntry(content=[])
+        assert _assistant_blocks(entry) == []
+
+    def test_foreign_reasoning_is_dropped(self) -> None:
+        entry = ModelEntry(api="responses", content=[
+            ThoughtSegment(thinking="elsewhere", thinking_signature="enc_abc"),
+            TextSegment(text="Answer"),
+        ])
         blocks = _assistant_blocks(entry)
-        assert blocks == [{"type": "text", "text": ""}]
+        assert [b["type"] for b in blocks] == ["text"]
 
 
 class TestToolResultBlock:

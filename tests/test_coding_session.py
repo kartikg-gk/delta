@@ -42,6 +42,16 @@ from delta_model.scripted import ReplayProvider
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+async def _begin(session) -> None:
+    """Send one prompt: a session is only saved once something happens in it."""
+    async def _no_title() -> str:
+        return ""
+
+    session.auto_name = _no_title
+    async for _ in session.submit("hello"):
+        pass
+
+
 
 def _make_reply(
     text: str = "Hello!",
@@ -123,6 +133,7 @@ async def test_create_persistent_session(tmp_path: Path) -> None:
         system="You are helpful.",
         sessions_dir=tmp_path,
     )
+    await _begin(session)
 
     # Vault file was created with a SessionMetaRecord
     vault = JsonlVault(tmp_path / f"{session.session_id}.jsonl")

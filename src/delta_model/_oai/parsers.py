@@ -18,6 +18,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from delta_model._oai.helpers import stream_failure
+
 # ---------------------------------------------------------------------------
 # Parsed signal types
 # ---------------------------------------------------------------------------
@@ -136,6 +138,15 @@ class StreamDecoder(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def _failure_text(code: str | None, message: str | None) -> str:
+    """Human-readable text for a provider-reported stream failure."""
+    if message:
+        return message
+    if code:
+        return f"Response failed: {code}"
+    return "Provider returned an error"
+
+
 class ChatDecoder:
     """Decodes Chat Completions streaming chunks into parsed signals.
 
@@ -150,9 +161,9 @@ class ChatDecoder:
 
     def decode(self, event_name: str, data: dict[str, Any]) -> list[ParsedSignal]:
         # Top-level error object (non-streaming error response)
-        error = data.get("error")
-        if isinstance(error, dict):
-            return [ParseFault(message=error.get("message", str(error)))]
+        failure = stream_failure(event_name, data)
+        if failure is not None:
+            return [ParseFault(message=_failure_text(*failure))]
 
         signals: list[ParsedSignal] = []
 
@@ -174,15 +185,16 @@ class ChatDecoder:
         delta = choice.get("delta", {})
         finish_reason = choice.get("finish_reason")
 
+        # Reasoning content (extended-thinking models). When one chunk carries
+        # both fields, the reasoning precedes the answer it leads to.
+        reasoning = delta.get("reasoning_content")
+        if reasoning:
+            signals.append(ReasoningChunk(text=reasoning))
+
         # Text content
         content = delta.get("content")
         if content:
             signals.append(TextChunk(text=content))
-
-        # Reasoning content (extended-thinking models)
-        reasoning = delta.get("reasoning_content")
-        if reasoning:
-            signals.append(ReasoningChunk(text=reasoning))
 
         # Tool call deltas
         for tc in delta.get("tool_calls", []):
@@ -238,6 +250,21 @@ class ResponsesDecoder:
 
     def __init__(self) -> None:
         self._tools: dict[int, _ToolBuffer] = {}
+        self._reasoned = False
+
+    def _resolve(self, idx: int, final: object) -> list[ParsedSignal]:
+        """Close the call at *idx*. A non-empty final string is authoritative;
+        an empty one (sent by some servers) keeps what was streamed."""
+        buf = self._tools.pop(idx, None)
+        if buf is None:
+            return []
+        arguments = final if isinstance(final, str) and final else buf.arguments_json
+        return [CallResolved(
+            index=buf.index,
+            call_id=buf.call_id,
+            name=buf.name,
+            arguments_json=arguments,
+        )]
 
     def decode(self, event_name: str, data: dict[str, Any]) -> list[ParsedSignal]:
         signals: list[ParsedSignal] = []
@@ -261,7 +288,13 @@ class ResponsesDecoder:
             case "response.reasoning_summary_text.delta":
                 delta = data.get("delta", "")
                 if delta:
+                    self._reasoned = True
                     signals.append(ReasoningChunk(text=delta))
+
+            case "response.reasoning_summary_part.done":
+                # Summary parts are separate paragraphs.
+                if self._reasoned:
+                    signals.append(ReasoningChunk(text="\n\n"))
 
             # --- tool calls ---------------------------------------------------
             case "response.output_item.added":
@@ -283,20 +316,18 @@ class ResponsesDecoder:
                     signals.append(CallArgFragment(index=idx, fragment=delta))
 
             case "response.function_call_arguments.done":
-                idx = data.get("output_index", 0)
-                buf = self._tools.pop(idx, None)
-                if buf is not None:
-                    # Prefer the server's complete string over our accumulation
-                    full_args = data.get("arguments", buf.arguments_json)
-                    signals.append(CallResolved(
-                        index=buf.index,
-                        call_id=buf.call_id,
-                        name=buf.name,
-                        arguments_json=full_args,
-                    ))
+                signals += self._resolve(data.get("output_index", 0), data.get("arguments"))
+
+            case "response.output_item.done":
+                # Some servers finish a call here without an arguments `done`.
+                item = data.get("item", {})
+                if item.get("type") == "function_call":
+                    signals += self._resolve(data.get("output_index", 0), item.get("arguments"))
 
             # --- completion ---------------------------------------------------
             case "response.completed":
+                for idx in sorted(self._tools):
+                    signals += self._resolve(idx, None)
                 resp = data.get("response", {})
                 usage = resp.get("usage")
                 status = resp.get("status", "completed")
@@ -304,15 +335,8 @@ class ResponsesDecoder:
                 signals.append(Finished(finish_reason=reason, usage=usage))
 
             # --- errors -------------------------------------------------------
-            case "error":
-                err = data.get("error", {})
-                msg = err.get("message", str(data))
-                signals.append(ParseFault(message=msg))
-
-            case "response.failed":
-                resp = data.get("response", {})
-                err = resp.get("last_error", {})
-                msg = err.get("message", "Response failed")
-                signals.append(ParseFault(message=msg))
+            case "error" | "response.failed":
+                failure = stream_failure(event_name, data) or (None, None)
+                signals.append(ParseFault(message=_failure_text(*failure)))
 
         return signals

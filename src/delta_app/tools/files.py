@@ -105,9 +105,20 @@ async def _run_read(
     return _read_text(path, arguments)
 
 
+_MAX_IMAGE_BYTES = 5_000_000
+
+
 def _read_image(path: Path) -> ToolOutcome:
     """Read an image file and return as a base64 ImageSegment."""
     try:
+        size = path.stat().st_size
+        if size > _MAX_IMAGE_BYTES:
+            # Providers reject oversized images, and an attached image is resent
+            # on every later turn, so one bad attachment would break the session.
+            return fault(
+                f"Image is {size / 1_000_000:.1f} MB; the limit is "
+                f"{_MAX_IMAGE_BYTES // 1_000_000} MB. Resize or crop it first."
+            )
         raw = path.read_bytes()
     except OSError as exc:
         return fault(f"Failed to read image: {exc}")

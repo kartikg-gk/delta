@@ -697,3 +697,29 @@ class TestIntegration:
         assert est1.used == est2.used
         assert est1.messages == est2.messages
         assert est1.system == est2.system
+
+
+class TestCompactionTurnBoundary:
+    """The kept part starts a whole user turn and keeps the newest prompt."""
+
+    def _call(self, i: int) -> ModelEntry:
+        return ModelEntry(content=[CallBlock(id=f"c{i}", name="Read", arguments={})])
+
+    def _result(self, i: int) -> ToolOutcomeEntry:
+        return ToolOutcomeEntry(tool_call_id=f"c{i}", tool_name="Read", content="r")
+
+    def test_newest_prompt_is_never_summarised(self) -> None:
+        transcript = [_human("old"), _model("a")] + [_human("new")]
+        for i in range(10):
+            transcript += [self._call(i), self._result(i)]
+        plan = plan_compaction(transcript, [], limits=ContextLimits(keep_recent=4, min_entries=4))
+        assert plan is not None
+        assert plan.to_keep[0] == transcript[2]
+
+    def test_kept_part_never_starts_with_an_orphaned_result(self) -> None:
+        transcript = [_human("only")]
+        for i in range(10):
+            transcript += [self._call(i), self._result(i)]
+        plan = plan_compaction(transcript, [], limits=ContextLimits(keep_recent=4, min_entries=4))
+        assert plan is not None
+        assert not isinstance(plan.to_keep[0], ToolOutcomeEntry)

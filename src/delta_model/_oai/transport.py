@@ -8,7 +8,7 @@ the provider adapter which composes this module.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 
 import httpx
 
@@ -19,7 +19,7 @@ from delta_model._oai.helpers import ServerSentEvent, parse_retry_after
 # Retriable status codes
 # ---------------------------------------------------------------------------
 
-_RETRIABLE_CODES = frozenset({429, 500, 502, 503, 504, 529})
+_RETRIABLE_CODES = frozenset({408, 409, 425, 429})
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ class HttpStreamError(Exception):
     @property
     def retriable(self) -> bool:
         """Return whether this status code warrants an automatic reattempt."""
-        return self.status in _RETRIABLE_CODES
+        return self.status in _RETRIABLE_CODES or self.status >= 500
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +109,13 @@ async def open_event_stream(
     headers: dict[str, str],
     *,
     signal: CancelToken | None = None,
+    on_accept: Callable[[httpx.Response], None] | None = None,
 ) -> AsyncIterator[ServerSentEvent]:
     """Execute a streaming POST and yield parsed SSE events.
 
     Raises ``HttpStreamError`` on any non-200 status code.  The caller is
-    responsible for retry orchestration.
+    responsible for retry orchestration.  ``on_accept`` sees the response once
+    its status is known good, before any event is read (e.g. for headers).
     """
     async with client.stream(
         "POST",
@@ -130,6 +132,8 @@ async def open_event_stream(
                     response.headers.get("retry-after")
                 ),
             )
+        if on_accept is not None:
+            on_accept(response)
 
         async for sse in _read_sse(response):
             if signal is not None and signal.is_cancelled():

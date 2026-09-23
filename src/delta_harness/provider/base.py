@@ -25,6 +25,12 @@ class ModelProvider(Protocol):
         messages: Sequence[TranscriptEntry],
         tools: Sequence[ToolSpec],
         signal: CancelToken | None = None,
+        cache_key: str | None = None,
     ) -> AsyncIterator[WireEvent]:
-        """Stream typed wire events for one model round-trip."""
+        """Stream typed wire events for one model round-trip.
+
+        ``cache_key`` is a stable per-conversation identifier a provider may
+        use to route successive requests toward the same prompt cache. It is
+        only passed when the caller has one, so adapters may omit it.
+        """
         ...

@@ -25,6 +25,7 @@ Usage::
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Sequence
+from contextlib import aclosing
 from dataclasses import replace
 from typing import Any
 
@@ -46,11 +47,12 @@ from delta_harness.contracts.transcript import (
     TranscriptEntry,
     entry_to_human,
 )
-from delta_harness.provider.wire import StreamFaultEvent, WireEvent
+from delta_harness.provider.wire import StreamFaultEvent, StreamOpenEvent, WireEvent
 from delta_model._claude.courier import ApiRejection, relay_sse
 from delta_model._claude.emitter import ResponseMachine
+from delta_model.correlation import wire_call_id
 from delta_model.settings import AnthropicProfile, Credential, ReasoningPolicy
-from delta_model.transport.backoff import compute_delay, pause_for_retry
+from delta_model.transport.backoff import build_retry_event, compute_delay, pause_for_retry
 from delta_model.transport.client import build_async_client
 from delta_model.transport.faults import format_http_error
 
@@ -85,9 +87,16 @@ def _user_content(entry: HumanEntry) -> list[dict[str, Any]]:
 def _assistant_blocks(entry: ModelEntry) -> list[dict[str, Any]]:
     """Convert a ``ModelEntry`` to Anthropic assistant content blocks."""
     blocks: list[dict[str, Any]] = []
+    # Reasoning signatures are opaque state owned by the vendor that minted
+    # them; replaying another vendor's as Anthropic thinking fails validation.
+    own_reasoning = entry.api == "messages"
     for seg in entry.content:
         if isinstance(seg, ThoughtSegment):
-            if seg.thinking_signature:
+            if not (own_reasoning and seg.thinking_signature):
+                continue
+            if seg.redacted:
+                blocks.append({"type": "redacted_thinking", "data": seg.thinking_signature})
+            else:
                 blocks.append({
                     "type": "thinking",
                     "thinking": seg.thinking,
@@ -101,18 +110,20 @@ def _assistant_blocks(entry: ModelEntry) -> list[dict[str, Any]]:
         elif isinstance(seg, CallBlock):
             blocks.append({
                 "type": "tool_use",
-                "id": seg.id,
+                "id": wire_call_id(seg.id),
                 "name": seg.name,
                 "input": seg.arguments,
             })
-    return blocks or [{"type": "text", "text": ""}]
+    # A turn left empty (e.g. reasoning-only from another vendor) is dropped by
+    # the caller: the API rejects empty assistant content.
+    return blocks
 
 
 def _tool_result_block(entry: ToolOutcomeEntry) -> dict[str, Any]:
     """Convert a ``ToolOutcomeEntry`` to an Anthropic tool_result block."""
     block: dict[str, Any] = {
         "type": "tool_result",
-        "tool_use_id": entry.tool_call_id,
+        "tool_use_id": wire_call_id(entry.tool_call_id),
         "content": entry.text or "",
     }
     if entry.is_error:
@@ -172,6 +183,100 @@ def _thinking_section(
     return {"type": "enabled", "budget_tokens": budget}
 
 
+# ---------------------------------------------------------------------------
+# Prompt caching
+# ---------------------------------------------------------------------------
+#
+# The API allows at most four cache markers and evaluates the cached prefix in
+# tools -> system -> messages order. All four are spent: the last tool, the
+# system prompt, this request's tail, and the previous request's tail. The
+# second message marker exists because the API looks back at most 20 blocks
+# from a marker; a turn with many parallel tool calls appends enough blocks to
+# push the previous cache entry out of a single tail marker's window.
+
+_CACHEABLE_BLOCKS = frozenset({"text", "image", "tool_result"})
+_FIRST_PARTY_HOST = "api.anthropic.com"
+
+
+def resolve_cache_retention(configured: str | None, base_url: str) -> str:
+    """Pick the effective cache lifetime for an endpoint."""
+    if configured is not None:
+        return configured
+    host = httpx.URL(base_url).host
+    return "short" if host == _FIRST_PARTY_HOST else "none"
+
+
+def _cache_marker(retention: str) -> dict[str, Any] | None:
+    """The ``cache_control`` value for a retention choice; ``None`` disables caching."""
+    if retention == "none":
+        return None
+    if retention == "long":
+        return {"type": "ephemeral", "ttl": "1h"}
+    return {"type": "ephemeral"}
+
+
+def _system_field(system: str, marker: dict[str, Any] | None) -> Any:
+    """The ``system`` value; a cached prompt must be sent as a marked text block."""
+    if marker is None or not system:
+        # Caching off keeps the plain-string shape; an empty block with a
+        # marker would be rejected outright.
+        return system
+    return [{"type": "text", "text": system, "cache_control": dict(marker)}]
+
+
+def _place_message_breakpoints(
+    messages: list[dict[str, Any]], marker: dict[str, Any] | None,
+) -> None:
+    """Mark this request's tail and the previous request's tail, in place."""
+    if marker is None or not messages:
+        return
+    positions = {len(messages) - 1}
+    earlier = _previous_request_tail(messages)
+    if earlier is not None:
+        positions.add(earlier)
+    for index in positions:
+        _mark_block(messages[index], marker)
+
+
+def _previous_request_tail(messages: list[dict[str, Any]]) -> int | None:
+    """Index where the previous request's message list ended.
+
+    History is append-only and each request stops just before the assistant
+    turn it produces, so the last user message before the final assistant turn
+    is where the previous request's tail marker sat. When that turn is missing
+    the result is an older position, which only shortens the reusable prefix.
+    """
+    last_reply = next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i]["role"] == "assistant"),
+        None,
+    )
+    if last_reply is None:
+        return None
+    return next(
+        (i for i in range(last_reply - 1, -1, -1) if messages[i]["role"] == "user"),
+        None,
+    )
+
+
+def _mark_block(message: dict[str, Any], marker: dict[str, Any]) -> None:
+    """Attach ``marker`` to a user message's final block when that block may carry one."""
+    if message.get("role") != "user":
+        return
+    content = message.get("content")
+    if not isinstance(content, list) or not content:
+        return
+    last = content[-1]
+    kind = last.get("type")
+    if kind not in _CACHEABLE_BLOCKS:
+        return
+    # A marker on an empty block is rejected by the API.
+    if kind == "text" and not last.get("text"):
+        return
+    if kind == "tool_result" and not last.get("content"):
+        return
+    last["cache_control"] = dict(marker)
+
+
 def _compose_body(
     *,
     model: str,
@@ -180,21 +285,42 @@ def _compose_body(
     tools: Sequence[ToolSpec],
     max_tokens: int,
     thinking: ReasoningPolicy,
+    cache_retention: str = "none",
 ) -> dict[str, Any]:
     """Assemble the complete Messages API request body."""
+    marker = _cache_marker(cache_retention)
+    compiled = _compile_messages(messages)
+    _place_message_breakpoints(compiled, marker)
     body: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
-        "messages": _compile_messages(messages),
+        "system": _system_field(system, marker),
+        "messages": compiled,
         "stream": True,
     }
     if tools:
         body["tools"] = [_tool_schema(t) for t in tools]
+        if marker is not None:
+            # One marker on the final tool caches the whole schema block.
+            body["tools"][-1]["cache_control"] = dict(marker)
     thinking_cfg = _thinking_section(thinking, max_tokens)
     if thinking_cfg is not None:
         body["thinking"] = thinking_cfg
     return body
+
+
+# Error types the Messages API sends inside an otherwise healthy stream when
+# the condition is temporary. Anything else (auth, invalid request) is final.
+_PASSING_STREAM_ERRORS = frozenset({"api_error", "overloaded_error", "rate_limit_error"})
+
+
+def _is_passing_stream_error(payload: dict[str, Any]) -> bool:
+    """Whether an in-stream ``error`` event is transient and safe to reissue."""
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    kind = error.get("type")
+    return isinstance(kind, str) and kind.lower() in _PASSING_STREAM_ERRORS
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +384,7 @@ class AnthropicProvider:
         messages: Sequence[TranscriptEntry],
         tools: Sequence[ToolSpec],
         signal: CancelToken | None = None,
+        cache_key: str | None = None,
     ) -> AsyncIterator[WireEvent]:
         """Stream wire events for one model round-trip."""
         return self._stream(
@@ -290,6 +417,9 @@ class AnthropicProvider:
             tools=tools,
             max_tokens=self._profile.max_tokens,
             thinking=self._profile.reasoning,
+            cache_retention=resolve_cache_retention(
+                self._profile.cache_retention, cred.base_url,
+            ),
         )
 
         retry = self._profile.retry
@@ -306,16 +436,54 @@ class AnthropicProvider:
             headers = _auth_headers(cred)
             machine = ResponseMachine(model=model, provider=self._profile.name)
 
+            # The stream-open event is held back until real content arrives.
+            # Until then nothing has reached the caller, so a transient error
+            # event can be retried invisibly; after that it must surface, or
+            # visible output and tool calls could be replayed.
+            held: list[WireEvent] = []
+            committed = False
+            passing_failure = False
+            failure_kind = ""
             try:
-                async for event_name, payload in relay_sse(
+                async with aclosing(relay_sse(
                     self._client, url, body, headers, signal=signal,
-                ):
-                    for wire_event in machine.ingest(event_name, payload):
-                        yield wire_event
+                )) as events:
+                    async for event_name, payload in events:
+                        if (
+                            event_name == "error"
+                            and not committed
+                            and attempt < retry.max_retries
+                            and _is_passing_stream_error(payload)
+                        ):
+                            passing_failure = True
+                            failure_kind = payload.get("error", {}).get("type", "stream error")
+                            break
+                        for wire_event in machine.ingest(event_name, payload):
+                            if not committed and isinstance(wire_event, StreamOpenEvent):
+                                held.append(wire_event)
+                                continue
+                            if not committed:
+                                committed = True
+                                for early in held:
+                                    yield early
+                                held.clear()
+                            yield wire_event
 
-                for wire_event in machine.seal():
-                    yield wire_event
-                return
+                if not passing_failure:
+                    for wire_event in [*held, *machine.seal()]:
+                        yield wire_event
+                    return
+
+                delay = compute_delay(attempt, max_delay_seconds=retry.max_delay_seconds)
+                yield build_retry_event(
+                    attempt=attempt, max_retries=retry.max_retries,
+                    delay_seconds=delay, reason=f"a transient {failure_kind}",
+                )
+                alive = await pause_for_retry(delay, signal=signal)
+                if not alive:
+                    yield self._cancelled(model)
+                    return
+                continue
 
             except ApiRejection as exc:
                 if not exc.retriable or attempt >= retry.max_retries:
@@ -328,6 +496,10 @@ class AnthropicProvider:
                 if exc.wait_hint is not None:
                     delay = max(delay, exc.wait_hint)
 
+                yield build_retry_event(
+                    attempt=attempt, max_retries=retry.max_retries,
+                    delay_seconds=delay, reason=f"HTTP {exc.status}",
+                )
                 alive = await pause_for_retry(delay, signal=signal)
                 if not alive:
                     yield self._cancelled(model)
@@ -340,6 +512,10 @@ class AnthropicProvider:
 
                 delay = compute_delay(
                     attempt, max_delay_seconds=retry.max_delay_seconds,
+                )
+                yield build_retry_event(
+                    attempt=attempt, max_retries=retry.max_retries,
+                    delay_seconds=delay, reason="a network error",
                 )
                 alive = await pause_for_retry(delay, signal=signal)
                 if not alive:

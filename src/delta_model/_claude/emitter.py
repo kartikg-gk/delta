@@ -72,6 +72,9 @@ class _ContentAccumulator:
     chunks: list[str] = field(default_factory=list)
     tool_id: str = ""
     tool_name: str = ""
+    # Opaque proof the API attaches to thinking (or the whole payload of a
+    # redacted block). It must be sent back verbatim on the next request.
+    signature: str | None = None
 
     @property
     def assembled(self) -> str:
@@ -268,7 +271,15 @@ class ResponseMachine:
             return [CallOpenEvent(content_index=slot, partial=self._snapshot())]
 
         if variety == "thinking":
-            self._accumulator = _ContentAccumulator(slot=slot, variety="thinking")
+            self._accumulator = _ContentAccumulator(
+                slot=slot, variety="thinking", signature=block.get("signature") or None,
+            )
+            return [ReasoningOpenEvent(content_index=slot, partial=self._snapshot())]
+
+        if variety == "redacted_thinking":
+            self._accumulator = _ContentAccumulator(
+                slot=slot, variety="redacted_thinking", signature=block.get("data") or None,
+            )
             return [ReasoningOpenEvent(content_index=slot, partial=self._snapshot())]
 
         # Default: text
@@ -299,6 +310,12 @@ class ResponseMachine:
                     content_index=slot, delta=fragment, partial=self._snapshot(),
                 )]
 
+        elif delta_type == "signature_delta":
+            self._accumulator.signature = (
+                self._accumulator.signature or ""
+            ) + delta.get("signature", "")
+            return []
+
         elif delta_type == "input_json_delta":
             fragment = delta.get("partial_json", "")
             if fragment:
@@ -323,8 +340,12 @@ class ResponseMachine:
                 content_index=slot, content=body, partial=self._snapshot(),
             )]
 
-        if acc.variety == "thinking":
-            self._thoughts.append(ThoughtSegment(thinking=body))
+        if acc.variety in ("thinking", "redacted_thinking"):
+            self._thoughts.append(ThoughtSegment(
+                thinking=body,
+                redacted=acc.variety == "redacted_thinking",
+                thinking_signature=acc.signature,
+            ))
             return [ReasoningCloseEvent(
                 content_index=slot, content=body, partial=self._snapshot(),
             )]

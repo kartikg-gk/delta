@@ -48,6 +48,10 @@ from delta_model._oai.parsers import (
 )
 
 
+def _segment(kind: str, body: str) -> ReplyContent:
+    return TextSegment(text=body) if kind == "text" else ThoughtSegment(thinking=body)
+
+
 class EventAssembler:
     """Accumulates parsed signals and emits Delta wire events.
 
@@ -67,10 +71,13 @@ class EventAssembler:
         # Ordered sequence of completed content blocks
         self._blocks: list[ReplyContent] = []
 
-        # Active text or reasoning block (at most one at a time)
-        self._active_kind: str | None = None  # "text" | "reasoning"
-        self._active_chunks: list[str] = []
-        self._active_idx: int = -1
+        # Open text/reasoning blocks by channel, in first-seen order. Chat
+        # Completions sends reasoning and answer as independent fields that can
+        # interleave (even within one chunk), so there each channel keeps one
+        # stable block until a boundary. Other APIs stream blocks in sequence,
+        # so opening one channel closes the other.
+        self._open: dict[str, tuple[int, list[str]]] = {}
+        self._independent = api == "chat"
 
         # Usage and halt
         self._usage: UsageStats = UsageStats()
@@ -90,15 +97,11 @@ class EventAssembler:
         """Build a ``ModelEntry`` reflecting the current accumulated state."""
         blocks: list[ReplyContent] = list(self._blocks)
 
-        # Append partial content from the active block
-        if self._active_kind == "text":
-            text = "".join(self._active_chunks)
-            if text:
-                blocks.append(TextSegment(text=text))
-        elif self._active_kind == "reasoning":
-            thinking = "".join(self._active_chunks)
-            if thinking:
-                blocks.append(ThoughtSegment(thinking=thinking))
+        # Append partial content from open blocks, in content-index order
+        for kind, (_idx, chunks) in sorted(self._open.items(), key=lambda kv: kv[1][0]):
+            body = "".join(chunks)
+            if body:
+                blocks.append(_segment(kind, body))
 
         return ModelEntry(
             model=self._response_model or self._model,
@@ -150,43 +153,25 @@ class EventAssembler:
         return []
 
     def _on_text(self, signal: TextChunk) -> list[WireEvent]:
-        events = self._ensure_open()
-        if self._active_kind != "text":
-            events.extend(self._close_active())
-            self._active_kind = "text"
-            self._active_chunks = []
-            self._active_idx = self._next_idx
-            self._next_idx += 1
-            events.append(ContentOpenEvent(
-                content_index=self._active_idx,
-                partial=self._snapshot(),
-            ))
-        self._active_chunks.append(signal.text)
-        events.append(ContentChunkEvent(
-            content_index=self._active_idx,
-            delta=signal.text,
-            partial=self._snapshot(),
-        ))
-        return events
+        return self._on_channel("text", signal.text)
 
     def _on_reasoning(self, signal: ReasoningChunk) -> list[WireEvent]:
+        return self._on_channel("reasoning", signal.text)
+
+    def _on_channel(self, kind: str, fragment: str) -> list[WireEvent]:
         events = self._ensure_open()
-        if self._active_kind != "reasoning":
-            events.extend(self._close_active())
-            self._active_kind = "reasoning"
-            self._active_chunks = []
-            self._active_idx = self._next_idx
+        if kind not in self._open:
+            if not self._independent:
+                events.extend(self._close_active())
+            idx = self._next_idx
             self._next_idx += 1
-            events.append(ReasoningOpenEvent(
-                content_index=self._active_idx,
-                partial=self._snapshot(),
-            ))
-        self._active_chunks.append(signal.text)
-        events.append(ReasoningChunkEvent(
-            content_index=self._active_idx,
-            delta=signal.text,
-            partial=self._snapshot(),
-        ))
+            self._open[kind] = (idx, [])
+            opener = ContentOpenEvent if kind == "text" else ReasoningOpenEvent
+            events.append(opener(content_index=idx, partial=self._snapshot()))
+        idx, chunks = self._open[kind]
+        chunks.append(fragment)
+        chunk_event = ContentChunkEvent if kind == "text" else ReasoningChunkEvent
+        events.append(chunk_event(content_index=idx, delta=fragment, partial=self._snapshot()))
         return events
 
     def _on_call_begin(self, signal: CallBegin) -> list[WireEvent]:
@@ -252,34 +237,15 @@ class EventAssembler:
     # --- block closing ------------------------------------------------------
 
     def _close_active(self) -> list[WireEvent]:
-        """Close the currently active text or reasoning block."""
-        if self._active_kind is None:
-            return []
-
-        content = "".join(self._active_chunks)
-        idx = self._active_idx
-        kind = self._active_kind
-
-        # Commit the completed block to the ordered sequence
-        if kind == "text":
-            self._blocks.append(TextSegment(text=content))
-        else:
-            self._blocks.append(ThoughtSegment(thinking=content))
-
-        self._active_kind = None
-        self._active_chunks = []
-
-        if kind == "text":
-            return [ContentCloseEvent(
-                content_index=idx,
-                content=content,
-                partial=self._snapshot(),
-            )]
-        return [ReasoningCloseEvent(
-            content_index=idx,
-            content=content,
-            partial=self._snapshot(),
-        )]
+        """Close every open text/reasoning block, committing them in index order."""
+        events: list[WireEvent] = []
+        for kind, (idx, chunks) in sorted(self._open.items(), key=lambda kv: kv[1][0]):
+            content = "".join(chunks)
+            self._blocks.append(_segment(kind, content))
+            del self._open[kind]
+            closer = ContentCloseEvent if kind == "text" else ReasoningCloseEvent
+            events.append(closer(content_index=idx, content=content, partial=self._snapshot()))
+        return events
 
     # --- finalisation -------------------------------------------------------
 

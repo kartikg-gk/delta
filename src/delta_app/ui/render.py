@@ -18,6 +18,7 @@ from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
     MessageUpdateEvent,
+    RetryEvent,
     ToolRunEndEvent,
     ToolRunStartEvent,
 )
@@ -133,6 +134,10 @@ class TranscriptRenderer:
             self._on_update(event)
         elif isinstance(event, MessageEndEvent):
             self._on_end(event)
+        elif isinstance(event, RetryEvent):
+            self._ensure_newline()
+            self._out.write(f"[retry] {event.message}\n")
+            self._out.flush()
         elif isinstance(event, ToolRunStartEvent):
             self._ensure_newline()
             self._out.write(f"[tool:{event.tool_name}] running...\n")

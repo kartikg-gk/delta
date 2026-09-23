@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -75,9 +76,14 @@ def _agents_md_search_paths(cwd: str) -> list[Path]:
     from delta_app.discovery import default_paths
 
     paths = default_paths(project=Path(cwd))
-    return [
+    user = [
         paths.home / _AGENTS_FILE,                  # ~/.delta/AGENTS.md
         paths.agents_home / _AGENTS_FILE,            # ~/.agents/AGENTS.md
+    ]
+    if not paths.project_enabled:
+        return user
+    return [
+        *user,
         paths.project / ".delta" / _AGENTS_FILE,     # <project>/.delta/AGENTS.md
         paths.project / ".agents" / _AGENTS_FILE,    # <project>/.agents/AGENTS.md
         paths.project / _AGENTS_FILE,                # <project>/AGENTS.md (highest)
@@ -94,18 +100,29 @@ def _read_agents_file(path: Path) -> str:
         return ""
 
 
+def _project_sections(cwd: str) -> list[PromptSection]:
+    """One section per ``AGENTS.md`` found, in precedence order.
+
+    The shared heading rides on the first file's section so that joining
+    every section reproduces the prompt exactly.
+    """
+    found = [
+        (path, content)
+        for path in _agents_md_search_paths(cwd)
+        if (content := _read_agents_file(path))
+    ]
+    sections: list[PromptSection] = []
+    for index, (path, content) in enumerate(found):
+        text = content
+        if index == 0:
+            text = f"## Project instructions ({_AGENTS_FILE})\n\n{content}"
+        sections.append(PromptSection("Project instructions", str(path), text))
+    return sections
+
+
 def _project_context(cwd: str) -> str:
     """Collect project instructions from ``AGENTS.md`` across the precedence hierarchy."""
-    search = _agents_md_search_paths(cwd)
-    sections: list[str] = []
-    for path in search:
-        content = _read_agents_file(path)
-        if content:
-            sections.append(content)
-    if not sections:
-        return ""
-    combined = "\n\n".join(sections)
-    return f"## Project instructions ({_AGENTS_FILE})\n\n{combined}"
+    return "\n\n".join(section.text for section in _project_sections(cwd))
 
 
 def _environment_suffix(cwd: str, *, include_date: bool) -> str:
@@ -113,6 +130,45 @@ def _environment_suffix(cwd: str, *, include_date: bool) -> str:
     if include_date:
         lines.append(f"Current date: {datetime.now(UTC):%Y-%m-%d}")
     return "\n".join(lines)
+
+
+@dataclass(frozen=True, slots=True)
+class PromptSection:
+    """One contiguous piece of the system prompt and where it came from."""
+
+    title: str
+    origin: str
+    text: str
+
+
+def prompt_sections(
+    *,
+    tools: Sequence[ToolSpec] = (),
+    skills: Sequence[Skill] = (),
+    cwd: str | None = None,
+    include_date: bool = True,
+) -> list[PromptSection]:
+    """The system prompt as attributed sections, in the order they are sent.
+
+    Joining the section texts with a blank line reproduces ``system_prompt``
+    exactly; empty sections are omitted rather than shown as blank.
+    """
+    resolved_cwd = cwd or os.getcwd()
+    tool_text = _tool_guidelines(tools)
+    skill_text = _skill_section(skills)
+    sections = [PromptSection("Identity", "built-in", _BASE_IDENTITY)]
+    if tool_text:
+        names = ", ".join(t.name for t in tools if t.prompt_snippet or t.prompt_guidelines)
+        sections.append(PromptSection("Tool guidelines", f"tools: {names}", tool_text))
+    if skill_text:
+        sections.append(PromptSection("Skills", f"{len(skills)} loaded skill(s)", skill_text))
+    sections += _project_sections(resolved_cwd)
+    sections.append(PromptSection(
+        "Environment",
+        "working directory" + (" and date" if include_date else ""),
+        _environment_suffix(resolved_cwd, include_date=include_date),
+    ))
+    return sections
 
 
 def system_prompt(
@@ -123,16 +179,8 @@ def system_prompt(
     include_date: bool = True,
 ) -> str:
     """Assemble the full system prompt: identity, tool guidance, skills, project context, env."""
-    resolved_cwd = cwd or os.getcwd()
-
-    sections = [
-        _BASE_IDENTITY,
-        _tool_guidelines(tools),
-        _skill_section(skills),
-        _project_context(resolved_cwd),
-        _environment_suffix(resolved_cwd, include_date=include_date),
-    ]
-    return "\n\n".join(section for section in sections if section)
+    sections = prompt_sections(tools=tools, skills=skills, cwd=cwd, include_date=include_date)
+    return "\n\n".join(section.text for section in sections)
 
 
-__all__ = ["system_prompt"]
+__all__ = ["PromptSection", "prompt_sections", "system_prompt"]

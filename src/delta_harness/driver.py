@@ -108,6 +108,8 @@ class RuntimeConfig:
     queue_mode: DrainPolicy = "one_at_a_time"
     before_tool_call: PreToolHook | None = None
     after_tool_call: PostToolHook | None = None
+    # Stable conversation id forwarded to every model request for cache routing.
+    cache_key: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +323,7 @@ class RuntimeHarness:
                 get_follow_up_messages=self._pop_followups,
                 before_tool_call=self._cfg.before_tool_call,
                 after_tool_call=self._cfg.after_tool_call,
+                cache_key=self._cfg.cache_key,
             ):
                 await self._fan_out(event)
                 yield event

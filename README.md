@@ -1,6 +1,6 @@
 # Delta
 
-A small, readable coding agent for your terminal. Delta runs a language model in a
+A minimal coding agent harness in Python, inspired by [pi](https://github.com/earendil-works/pi) (TypeScript). Delta runs a language model in a
 loop with file and shell tools, saves every session so you can resume or branch it,
 and ships both a terminal UI and a scriptable one-shot mode.
 

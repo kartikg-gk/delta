@@ -10,6 +10,7 @@ stops it).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 
 from delta_harness.contracts.stream import (
@@ -17,6 +18,7 @@ from delta_harness.contracts.stream import (
     MessageEndEvent,
     MessageStartEvent,
     MessageUpdateEvent,
+    RetryEvent,
     RunEndEvent,
     RunStartEvent,
     ToolRunEndEvent,
@@ -33,6 +35,7 @@ from delta_harness.contracts.transcript import (
     ToolOutcomeEntry,
     TranscriptEntry,
 )
+from delta_harness.mending import mend_tool_history
 from delta_harness.provider import wire
 from delta_harness.provider.base import ModelProvider
 
@@ -64,6 +67,30 @@ def _make_error_reply(model: str, reason: str) -> ModelEntry:
 # --- provider streaming -----------------------------------------------------
 
 
+def _accepts_cache_key(provider: ModelProvider) -> bool:
+    """Whether ``provider.stream_response`` takes ``cache_key`` (or ``**kwargs``)."""
+    try:
+        params = inspect.signature(provider.stream_response).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        p.name == "cache_key" or p.kind is inspect.Parameter.VAR_KEYWORD for p in params
+    )
+
+
+def _is_empty_failure(entry: TranscriptEntry) -> bool:
+    """A reply that failed before producing anything.
+
+    It stays in the transcript as a record of what happened, but providers
+    reject an assistant turn with no content, so it is not sent back.
+    """
+    return (
+        isinstance(entry, ModelEntry)
+        and entry.stop_reason in ("error", "aborted")
+        and not entry.content
+    )
+
+
 async def _stream_model_reply(
     provider: ModelProvider,
     model: str,
@@ -71,14 +98,19 @@ async def _stream_model_reply(
     transcript: list[TranscriptEntry],
     tool_defs: list[ToolSpec],
     token: CancelToken | None,
+    cache_key: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Relay wire events from the provider as agent-level message events."""
+    # Only forwarded to adapters that declare the parameter, so providers
+    # written before it existed keep working unchanged.
+    routing = {"cache_key": cache_key} if cache_key and _accepts_cache_key(provider) else {}
     raw: AsyncIterator[wire.WireEvent] = provider.stream_response(
         model=model,
         system=system,
         messages=transcript,
         tools=tool_defs,
         signal=token,
+        **routing,
     )
     saw_open = False
     async for evt in raw:
@@ -93,6 +125,13 @@ async def _stream_model_reply(
             if not saw_open:
                 yield MessageStartEvent(message=evt.error)
             yield MessageEndEvent(message=evt.error)
+        elif isinstance(evt, wire.SourceRetryEvent):
+            yield RetryEvent(
+                attempt=evt.attempt,
+                max_attempts=evt.max_attempts,
+                delay_seconds=evt.delay_seconds,
+                message=evt.message,
+            )
         else:
             yield MessageUpdateEvent(
                 message=evt.partial,
@@ -297,6 +336,7 @@ async def run_agent_loop(
     get_follow_up_messages: Callable[[], Sequence[TranscriptEntry]] | None = None,
     before_tool_call: PreToolHook | None = None,
     after_tool_call: PostToolHook | None = None,
+    cache_key: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     """Run the provider/tool loop and emit portable agent events."""
     emitted: list[TranscriptEntry] = list(prompts)
@@ -363,8 +403,15 @@ async def run_agent_loop(
                 return
 
             assistant: ModelEntry | None = None
+            # Last safety net for callers that never mended stored history:
+            # the provider sees valid call/result pairing, the transcript the
+            # harness owns is left exactly as it is.
+            outbound = [
+                entry for entry in mend_tool_history(messages).entries
+                if not _is_empty_failure(entry)
+            ]
             async for ev in _stream_model_reply(
-                provider, model, system, messages, tools, signal,
+                provider, model, system, outbound, tools, signal, cache_key,
             ):
                 yield ev
                 if isinstance(ev, MessageEndEvent) and isinstance(ev.message, ModelEntry):

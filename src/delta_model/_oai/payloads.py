@@ -26,6 +26,7 @@ from delta_harness.contracts.transcript import (
     TranscriptEntry,
     entry_to_human,
 )
+from delta_model.correlation import wire_call_id
 
 # ---------------------------------------------------------------------------
 # Tool schema conversion
@@ -78,7 +79,7 @@ def _user_blocks(entry: HumanEntry) -> str | list[dict[str, Any]]:
 def _serialize_call(call: CallBlock) -> dict[str, Any]:
     """Serialise a ``CallBlock`` to the Chat Completions tool_calls format."""
     return {
-        "id": call.id,
+        "id": wire_call_id(call.id),
         "type": "function",
         "function": {
             "name": call.name,
@@ -107,7 +108,7 @@ def _chat_tool_result_msg(entry: ToolOutcomeEntry) -> dict[str, Any]:
     """Convert a ``ToolOutcomeEntry`` to a Chat Completions tool message."""
     return {
         "role": "tool",
-        "tool_call_id": entry.tool_call_id,
+        "tool_call_id": wire_call_id(entry.tool_call_id),
         "content": entry.text or "",
     }
 
@@ -151,7 +152,7 @@ def _to_responses_items(entry: TranscriptEntry) -> list[dict[str, Any]]:
         for call in entry.tool_calls:
             items.append({
                 "type": "function_call",
-                "call_id": call.id,
+                "call_id": wire_call_id(call.id),
                 "name": call.name,
                 "arguments": json.dumps(call.arguments),
             })
@@ -160,7 +161,7 @@ def _to_responses_items(entry: TranscriptEntry) -> list[dict[str, Any]]:
     if isinstance(entry, ToolOutcomeEntry):
         return [{
             "type": "function_call_output",
-            "call_id": entry.tool_call_id,
+            "call_id": wire_call_id(entry.tool_call_id),
             "output": entry.text or "",
         }]
 

@@ -90,6 +90,16 @@ class TurnEndEvent(StrictModel):
     tool_results: list[ToolOutcomeEntry] = Field(default_factory=list)
 
 
+class RetryEvent(StrictModel):
+    """A failed attempt is about to be retried. Progress only, not a result."""
+
+    type: Literal["retry"] = "retry"
+    attempt: int
+    max_attempts: int
+    delay_seconds: float = 0.0
+    message: str
+
+
 class RunStartEvent(StrictModel):
     """Marks the beginning of an agent run."""
 
@@ -113,6 +123,7 @@ type AgentEvent = Annotated[
     | MessageEndEvent
     | ToolRunStartEvent
     | ToolRunUpdateEvent
-    | ToolRunEndEvent,
+    | ToolRunEndEvent
+    | RetryEvent,
     Field(discriminator="type"),
 ]

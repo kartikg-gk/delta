@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from delta_app.conversation import CodingSession
+    from delta_app.trust import Asker, Choice, TrustOutcome, TrustRequest
 
 
 async def build_session(ns: argparse.Namespace) -> CodingSession:
@@ -53,6 +54,7 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
     provider = _resolve_provider(getattr(ns, "provider", None))
 
     verbose = getattr(ns, "verbose", False)
+    await settle_project_trust(ns)
     _load_extensions(verbose=verbose)
     tools = _load_tools(verbose=verbose)
     skills = _load_skills(os.getcwd(), verbose=verbose)
@@ -86,6 +88,7 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
                 tools_loader=_tools_loader,
                 skills_loader=_skills_loader,
                 templates_loader=_templates_loader,
+                keep_model=bool(getattr(ns, "model", None)),
             )
         except FileNotFoundError:
             _die(f"Session not found: {resume}")
@@ -112,6 +115,99 @@ async def build_session(ns: argparse.Namespace) -> CodingSession:
     _install_safety(session.harness, ApprovalPolicy.AUTO)
     attach_logger(session)
     return session
+
+
+def _is_interactive(ns: argparse.Namespace) -> bool:
+    """A human is at a terminal and this run is not one-shot or piped."""
+    import sys
+
+    if getattr(ns, "print_mode", False) or getattr(ns, "prompt", None) is not None:
+        return False
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+async def settle_project_trust(
+    ns: argparse.Namespace, *, ask: Asker | None = None,
+) -> TrustOutcome:
+    """Decide whether this folder's project inputs load, before any are read.
+
+    ``ask`` lets a frontend supply its own question; without one, an
+    interactive terminal is asked on the console and anything else declines.
+    Cancelling the question ends startup.
+    """
+    from delta_app.cli.main import _die, _info, _warn
+    from delta_app.config.store import load_config
+    from delta_app.trust import StartupCancelled, resolve_project_trust
+
+    override: bool | None = None
+    if getattr(ns, "approve", False):
+        override = True
+    elif getattr(ns, "no_approve", False):
+        override = False
+    if ask is None and _is_interactive(ns):
+        ask = ask_on_console
+    default = load_config().project_trust or "ask"
+
+    try:
+        outcome = await resolve_project_trust(
+            os.getcwd(), override=override, default=default, ask=ask,  # type: ignore[arg-type]
+        )
+    except StartupCancelled:
+        _die("No project trust decision made; exiting.")
+    if outcome.notice:
+        _warn(outcome.notice)
+    if not outcome.trusted and outcome.inputs is not None and not outcome.inputs.empty:
+        _info(
+            f"Project inputs not loaded ({outcome.inputs.describe()}): {outcome.reason}. "
+            "Run with --approve to load them this once."
+        )
+    return outcome
+
+
+def trust_choices(request: TrustRequest) -> list[tuple[Choice, str]]:
+    from delta_app.trust import Choice
+
+    menu = [(Choice.TRUST_FOLDER, "Trust this folder")]
+    if request.parent is not None:
+        menu.append((Choice.TRUST_PARENT, f"Trust parent folder ({request.parent})"))
+    menu += [
+        (Choice.TRUST_ONCE, "Trust for this run only"),
+        (Choice.DISTRUST_FOLDER, "Do not trust this folder"),
+        (Choice.DISTRUST_ONCE, "Do not trust for this run only"),
+    ]
+    return menu
+
+
+def trust_question(request: TrustRequest) -> str:
+    """The explanation shown above the choices, shared by every frontend."""
+    lines = [
+        f"{request.folder} contains project inputs: {request.inputs.describe()}.",
+        "They shape the agent's instructions and can add plugins that run as code.",
+        "This controls project inputs; it is not a sandbox.",
+    ]
+    if request.store_problem:
+        lines.append(f"Saved decisions are unavailable: {request.store_problem}")
+    return "\n".join(lines)
+
+
+async def ask_on_console(request: TrustRequest) -> Choice | None:
+    """Ask on the terminal; EOF or Ctrl+C cancels."""
+    import asyncio
+    import sys
+
+    menu = trust_choices(request)
+    sys.stderr.write(trust_question(request) + "\n")
+    for number, (_choice, label) in enumerate(menu, start=1):
+        sys.stderr.write(f"  {number}. {label}\n")
+    loop = asyncio.get_running_loop()
+    while True:
+        try:
+            answer = await loop.run_in_executor(None, input, f"Choose 1-{len(menu)}: ")
+        except (EOFError, KeyboardInterrupt):
+            return None
+        answer = answer.strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(menu):
+            return menu[int(answer) - 1][0]
 
 
 def attach_logger(session: CodingSession) -> None:
@@ -153,4 +249,11 @@ def git_branch(cwd: str | None = None) -> str | None:
     return branch or None
 
 
-__all__ = ["build_session", "git_branch"]
+__all__ = [
+    "ask_on_console",
+    "build_session",
+    "git_branch",
+    "settle_project_trust",
+    "trust_choices",
+    "trust_question",
+]

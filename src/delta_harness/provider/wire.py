@@ -103,7 +103,8 @@ type WireEvent = Annotated[
     | ReasoningCloseEvent
     | CallOpenEvent
     | CallChunkEvent
-    | CallCloseEvent,
+    | CallCloseEvent
+    | SourceRetryEvent,
     Field(discriminator="type"),
 ]
 

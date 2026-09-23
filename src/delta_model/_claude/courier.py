@@ -20,7 +20,7 @@ from delta_harness.contracts.tooling import CancelToken
 # Retriable status codes
 # ---------------------------------------------------------------------------
 
-_TRANSIENT_CODES = frozenset({429, 500, 502, 503, 529})
+_TRANSIENT_CODES = frozenset({408, 409, 425, 429})
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +46,7 @@ class ApiRejection(Exception):
     @property
     def retriable(self) -> bool:
         """Return whether this status code warrants an automatic reattempt."""
-        return self.status in _TRANSIENT_CODES
+        return self.status in _TRANSIENT_CODES or self.status >= 500
 
 
 # ---------------------------------------------------------------------------

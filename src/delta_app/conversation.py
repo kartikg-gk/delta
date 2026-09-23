@@ -29,7 +29,7 @@ import os
 import re
 import subprocess
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import time
 from typing import Any
@@ -46,9 +46,13 @@ from delta_app.context.budget import (
     resolve_window,
 )
 from delta_app.directives import build_default_registry, parse_command
+from delta_app.instructions import PromptSection
+from delta_app.routing import ROUTED_PROVIDER, RoutePin, is_route_failure, pin_from_storage
 from delta_harness.contracts.stream import (
     AgentEvent,
     MessageEndEvent,
+    MessageStartEvent,
+    RetryEvent,
     RunEndEvent,
 )
 from delta_harness.contracts.tooling import ToolSpec
@@ -67,10 +71,12 @@ from delta_harness.driver import (
     RuntimeConfig,
     RuntimeHarness,
 )
+from delta_harness.mending import HistoryMend, mend_tool_history
 from delta_harness.provider.base import ModelProvider
 from delta_harness.provider.wire import StreamCloseEvent
-from delta_harness.session.index import SessionCatalog, SessionMeta
+from delta_harness.session.index import SessionCatalog
 from delta_harness.session.records import (
+    ExtensionRecord,
     ForkSummaryRecord,
     ModelSwapRecord,
     PruneRecord,
@@ -83,6 +89,7 @@ from delta_harness.session.records import (
     mint_id,
 )
 from delta_harness.session.replay import (
+    TreeIntegrityError,
     find_tip,
     project_active_branch,
     project_records,
@@ -110,7 +117,7 @@ COMMAND_REGISTRY = build_default_registry()
 _RUNNABLE_COMMANDS: frozenset[str] = frozenset({
     "branch", "branches", "compact", "continue", "create-skill", "diag",
     "export", "help", "model", "name", "plan", "provider", "quit", "reload",
-    "rewind", "shell", "skills", "stats", "think", "version",
+    "rewind", "session", "shell", "skills", "stats", "system", "think", "version",
 })
 
 _RUNNABLE_COMMAND_TABLE: tuple[tuple[str, str], ...] = tuple(
@@ -232,6 +239,49 @@ def summarize_prompt(text: str, *, limit: int = _TITLE_MAX_CHARS) -> str:
 
 
 # ── session statistics ─────────────────────────────────────────────────────
+
+
+# Phrases providers use when a request exceeds the model's context window.
+_OVERFLOW_PHRASES = (
+    "context length",
+    "context window",
+    "context limit",
+    "maximum context",
+    "max context",
+    "input is too long",
+    "input length",
+    "prompt is too long",
+    "too many tokens",
+    "token limit",
+    "exceeds the limit",
+    "exceeded the limit",
+)
+
+
+def _is_context_overflow(reply: ModelEntry) -> bool:
+    """Whether a failed reply reports that the prompt did not fit."""
+    if reply.stop_reason != "error":
+        return False
+    text = (reply.error_message or "").lower()
+    return any(phrase in text for phrase in _OVERFLOW_PHRASES)
+
+
+_HISTORY_REPAIR_NAMESPACE = "delta.history-repair"
+
+
+def _records_after(
+    records: list[SessionRecord], tip_id: str | None, ancestor_id: str | None,
+) -> list[SessionRecord]:
+    """Records on the active path strictly after ``ancestor_id``, root-first."""
+    if tip_id is None:
+        return []
+    try:
+        path = trace_to_entry(records, tip_id)
+    except TreeIntegrityError:
+        return []
+    ids = [record.id for record in path]
+    start = ids.index(ancestor_id) + 1 if ancestor_id in ids else 0
+    return path[start:]
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,6 +422,33 @@ class SessionStats:
     total_cost_usd: float = 0.0
     estimated_context_tokens: int = 0
     context_limit: int = DEFAULT_WINDOW
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    # Prompt size and cached share of the most recent model request.
+    latest_prompt_tokens: int = 0
+    latest_cache_read_tokens: int = 0
+
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """Share of all prompt tokens this session served from the cache.
+
+        ``None`` while no provider has reported any cache activity, so a
+        backend without prompt caching never shows a misleading 0%.
+        """
+        if not self._cache_active or self.total_input_tokens <= 0:
+            return None
+        return self.cache_read_tokens / self.total_input_tokens
+
+    @property
+    def latest_cache_hit_rate(self) -> float | None:
+        """Share of the latest request's prompt served from the cache."""
+        if not self._cache_active or self.latest_prompt_tokens <= 0:
+            return None
+        return self.latest_cache_read_tokens / self.latest_prompt_tokens
+
+    @property
+    def _cache_active(self) -> bool:
+        return self.cache_read_tokens > 0 or self.cache_write_tokens > 0
 
 
 # ── main class ─────────────────────────────────────────────────────────────
@@ -409,6 +486,7 @@ class CodingSession:
         self._session_id = session_id
         self._vault = vault
         self._catalog = catalog
+        self._pending_header: SessionMetaRecord | None = None
         self._provider = provider
         self._provider_name = provider_name
         self._model = model
@@ -439,12 +517,18 @@ class CodingSession:
         # sessions.
         self._all_tools: list[ToolSpec] = list(tools)
         self._plan_mode = False
+        # Backend pin for routed providers; see ``delta_app.routing``.
+        self._route = RoutePin()
 
         # Cumulative stats
         self._turn_count = 0
         self._total_input = 0
         self._total_output = 0
         self._total_cost = 0.0
+        self._cache_read = 0
+        self._cache_write = 0
+        self._latest_prompt = 0
+        self._latest_cache_read = 0
 
         # Build harness
         config = RuntimeConfig(
@@ -452,6 +536,7 @@ class CodingSession:
             model=model,
             system=system,
             tools=list(tools),
+            cache_key=session_id,
         )
         self._harness = RuntimeHarness(config, messages=transcript or [])
 
@@ -466,10 +551,7 @@ class CodingSession:
         if transcript:
             for entry in transcript:
                 if isinstance(entry, ModelEntry):
-                    self._turn_count += 1
-                    self._total_input += entry.usage.input
-                    self._total_output += entry.usage.output
-                    self._total_cost += entry.usage.cost.total
+                    self._tally(entry)
 
     
 
@@ -494,25 +576,18 @@ class CodingSession:
         vault: JsonlVault | None = None
         catalog: SessionCatalog | None = None
         root_id: str | None = None
+        header: SessionMetaRecord | None = None
         effective_cwd = cwd or os.getcwd()
         if sessions_dir is not None:
             vault = JsonlVault(sessions_dir / f"{sid}.jsonl")
             # The metadata record is the tree root; everything else descends
             # from it so a parent-chain walk always reaches session cwd/title.
-            meta = SessionMetaRecord(cwd=effective_cwd)
-            await vault.append(meta)
-            root_id = meta.id
+            # Nothing is written until the first record, so a session that is
+            # opened and left never shows up as an empty resumable one.
+            header = SessionMetaRecord(cwd=effective_cwd)
+            root_id = header.id
             catalog = SessionCatalog(sessions_dir)
-            catalog.upsert(
-                SessionCatalog.prepare(
-                    session_id=sid,
-                    vault_path=vault.path,
-                    cwd=effective_cwd,
-                    model=model,
-                    provider=provider_name,
-                )
-            )
-        return cls(
+        session = cls(
             session_id=sid,
             vault=vault,
             catalog=catalog,
@@ -527,6 +602,9 @@ class CodingSession:
             skills_loader=skills_loader,
             templates_loader=templates_loader,
         )
+        if vault is not None:
+            session._pending_header = header
+        return session
 
     @classmethod
     async def resume(
@@ -542,8 +620,13 @@ class CodingSession:
         tools_loader: Callable[[], list[ToolSpec]] | None = None,
         skills_loader: Callable[[], list[Any]] | None = None,
         templates_loader: Callable[[], list[Any]] | None = None,
+        keep_model: bool = False,
     ) -> CodingSession:
-        """Load an existing session from persistent storage."""
+        """Load an existing session from persistent storage.
+
+        *keep_model* uses *model* even when the session recorded another,
+        for a model the caller chose explicitly.
+        """
         vault = JsonlVault(sessions_dir / f"{session_id}.jsonl")
         if not vault.path.exists():
             raise FileNotFoundError(f"Session not found: {session_id}")
@@ -558,14 +641,22 @@ class CodingSession:
 
         catalog = SessionCatalog(sessions_dir)
         catalog.touch(session_id)
+        meta = catalog.get(session_id)
+        # The recorded model belongs to the provider the session last used.
+        # Under a different provider it would be rejected, so keep the
+        # active provider's model; an explicit choice always wins.
+        stored = meta.provider if meta is not None else None
+        if not keep_model and (stored is None or stored == provider_name):
+            # The starting model lives in the index; later switches in the log.
+            model = state.model or (meta.model if meta is not None else None) or model
 
-        return cls(
+        session = cls(
             session_id=session_id,
             vault=vault,
             catalog=catalog,
             provider=provider,
             provider_name=provider_name,
-            model=state.model or model,
+            model=model,
             system=system,
             tools=tools or [],
             transcript=state.transcript,
@@ -578,6 +669,13 @@ class CodingSession:
             skills_loader=skills_loader,
             templates_loader=templates_loader,
         )
+        if meta is not None:
+            session._route = pin_from_storage(
+                meta.inference_provider, meta.inference_provider_mode,
+            )
+            session._apply_route()
+        await session._mend_stored_history()
+        return session
 
     # ── run lifecycle ──────────────────────────────────────────────────
 
@@ -631,7 +729,7 @@ class CodingSession:
     async def shutdown(self) -> None:
         """Flush pending state and release resources."""
         self._unsubscribe()
-        if self._tip_id:
+        if self._tip_id and self._pending_header is None:
             await self._append_record(
                 TipRecord(entry_id=self._tip_id), advance_tip=False
             )
@@ -660,7 +758,11 @@ class CodingSession:
     async def switch_model(self, model: str) -> None:
         """Switch to a different model identifier (takes effect next turn)."""
         self._model = model
-        self._harness.settings.model = model
+        if self._route.mode == "automatic":
+            # A learned backend was learned for the previous model.
+            self._route = RoutePin()
+            self._sync_route_to_catalog()
+        self._apply_route()
         await self._append_record(ModelSwapRecord(model=model))
 
     async def switch_provider(
@@ -672,6 +774,15 @@ class CodingSession:
         """Replace the active model provider (takes effect next turn)."""
         self._provider = provider
         self._provider_name = provider_name
+        self._route = RoutePin()
+        self._apply_route()
+        self._sync_route_to_catalog()
+        if self._catalog is not None:
+            existing = self._catalog.get(self._session_id)
+            if existing is not None:
+                self._catalog.upsert(replace(
+                    existing, provider=provider_name, updated_at=time(),
+                ))
         # A fresh provider carries its own configured reasoning policy; the
         # session's chosen thinking level has to be re-applied on top.
         self._apply_thinking_level()
@@ -698,16 +809,22 @@ class CodingSession:
         setter = getattr(self._provider, "set_reasoning", None)
         if setter is None:
             return
-        from delta_app.reasoning import normalize_thinking_level, thinking_to_budget
+        from delta_app.reasoning import (
+            normalize_thinking_level,
+            thinking_to_budget,
+            thinking_to_effort,
+        )
         from delta_model.settings import ReasoningPolicy
 
         if self._thinking_level is None:
             setter(ReasoningPolicy(enabled=False))
             return
         level = normalize_thinking_level(self._thinking_level)
-        setter(
-            ReasoningPolicy(enabled=True, budget_tokens=thinking_to_budget(level))
-        )
+        setter(ReasoningPolicy(
+            enabled=True,
+            budget_tokens=thinking_to_budget(level),
+            effort=thinking_to_effort(level),
+        ))
 
     @property
     def thinking_level(self) -> str | None:
@@ -847,17 +964,67 @@ class CodingSession:
         existing = self._catalog.get(self._session_id)
         if existing is None:
             return
-        self._catalog.upsert(
-            SessionMeta(
-                session_id=existing.session_id,
-                vault_path=existing.vault_path,
-                cwd=existing.cwd,
-                model=existing.model,
-                provider=existing.provider,
-                title=title,
-                created_at=existing.created_at,
-                updated_at=time(),
-            )
+        self._catalog.upsert(replace(existing, title=title, updated_at=time()))
+
+    # ── inference routing ──────────────────────────────────────────────
+
+    @property
+    def inference_route(self) -> RoutePin:
+        """The backend pin in effect for a routed provider."""
+        return self._route
+
+    def set_inference_route(self, backend: str | None) -> None:
+        """Choose a backend (fixed) or hand the choice back to the router."""
+        self._route = RoutePin("fixed", backend) if backend else RoutePin()
+        self._apply_route()
+        self._sync_route_to_catalog()
+
+    def _apply_route(self) -> None:
+        """Send the routed model id when this provider routes, else the plain one."""
+        routed = self._provider_name == ROUTED_PROVIDER
+        self._harness.settings.model = (
+            self._route.model_for(self._model) if routed else self._model
+        )
+
+    def _sync_route_to_catalog(self) -> None:
+        if self._catalog is None:
+            return
+        existing = self._catalog.get(self._session_id)
+        if existing is None:
+            return
+        self._catalog.upsert(replace(
+            existing,
+            inference_provider=self._route.backend,
+            inference_provider_mode=self._route.mode,
+            updated_at=time(),
+        ))
+
+    def _learn_route(self) -> None:
+        """Pin the backend that just answered, for an automatic route."""
+        if self._provider_name != ROUTED_PROVIDER or self._route.backend:
+            return
+        if self._route.mode != "automatic":
+            return
+        served = getattr(self._provider, "served_by", None)
+        if served:
+            self._route = RoutePin("automatic", served)
+            self._apply_route()
+            self._sync_route_to_catalog()
+
+    def _should_reroute(self, reply: ModelEntry) -> bool:
+        """Whether a failed reply should retry on the router's own choice.
+
+        Only a learned pin is abandoned, only for a status that points at
+        that backend being unhealthy, and only when the failure produced no
+        output — replaying partial text or tool calls would duplicate them.
+        """
+        return (
+            self._provider_name == ROUTED_PROVIDER
+            and self._route.mode == "automatic"
+            and self._route.backend is not None
+            and reply.stop_reason == "error"
+            and not reply.content
+            and is_route_failure(getattr(self._provider, "last_failure_status", None))
         )
 
     # ── slash-command dispatch ─────────────────────────────────────────
@@ -920,6 +1087,8 @@ class CodingSession:
             "create-skill": self._cmd_create_skill,
             "reload": self._cmd_reload,
             "diag": self._cmd_diag,
+            "system": self._cmd_system,
+            "session": self._cmd_session,
             "help": self._cmd_help,
         }
 
@@ -957,6 +1126,7 @@ class CodingSession:
                     subprocess.run,
                     command,
                     shell=True,  # noqa: S602 — intentional user-controlled execution
+                    stdin=subprocess.DEVNULL,
                     capture_output=True,
                     text=True,
                     timeout=timeout,
@@ -1049,9 +1219,8 @@ class CodingSession:
         self._harness.set_messages(state.transcript)
         self._record_ids = state.record_ids
         self._tip_id = entry_id
-        if state.model:
-            self._model = state.model
-            self._harness.settings.model = state.model
+        # The active model stays: an older point may predate a model or
+        # provider switch, and its model would not fit the current provider.
         if state.thinking_level is not None:
             self._thinking_level = state.thinking_level
         if state.title:
@@ -1060,6 +1229,90 @@ class CodingSession:
         await self._append_record(
             TipRecord(entry_id=entry_id), advance_tip=False
         )
+        await self._mend_stored_history()
+
+    async def _mend_stored_history(self) -> HistoryMend | None:
+        """Repair malformed tool-call pairing in the active branch, durably.
+
+        The log is append-only, so nothing is rewritten: a diagnostic record
+        and the repaired messages are appended as a new branch, and the tip
+        moves there. Model, reasoning level, and title are snapshotted onto
+        the branch so it projects to the same session state. Valid history is
+        left alone, so repeated loads never stack up repair branches.
+        """
+        transcript = list(self._harness.transcript)
+        mend = mend_tool_history(transcript)
+        if not mend.changed:
+            return None
+        self._harness.set_messages(list(mend.entries))
+        if self._vault is None:
+            return mend
+
+        records = await self._vault.read_all()
+        parent_id, fresh = self._repair_branch_point(records, transcript, mend.entries)
+        dropped = _records_after(records, self._tip_id, parent_id)
+
+        staged: list[SessionRecord] = [
+            ExtensionRecord(
+                parent_id=parent_id,
+                namespace=_HISTORY_REPAIR_NAMESPACE,
+                data={"version": 1, **mend.counters()},
+            )
+        ]
+        staged += [TranscriptRecord(message=entry) for entry in fresh]
+        staged.append(ModelSwapRecord(model=self._model))
+        staged.append(ReasoningLevelRecord(thinking_level=self._thinking_level))
+        if self._title:
+            staged.append(TagRecord(label=self._title))
+        # Application records that sat on the abandoned stretch travel along.
+        staged += [
+            ExtensionRecord(namespace=r.namespace, data=r.data)
+            for r in dropped
+            if isinstance(r, ExtensionRecord) and r.namespace != _HISTORY_REPAIR_NAMESPACE
+        ]
+        for previous, record in zip(staged, staged[1:], strict=False):
+            record.parent_id = previous.id
+        for record in staged:
+            await self._vault.append(record)
+        self._tip_id = staged[-1].id
+        await self._append_record(TipRecord(entry_id=self._tip_id), advance_tip=False)
+
+        state = project_records(trace_to_entry([*records, *staged], self._tip_id))
+        self._record_ids = state.record_ids
+        return mend
+
+    @staticmethod
+    def _repair_branch_point(
+        records: list[SessionRecord],
+        original: list[TranscriptEntry],
+        repaired: tuple[TranscriptEntry, ...],
+    ) -> tuple[str | None, list[TranscriptEntry]]:
+        """Where the repair branch attaches, and which messages it must carry.
+
+        It attaches after the longest unchanged prefix when the log up to that
+        record projects to exactly that prefix. Compaction can break that
+        (messages it kept may precede the compaction record itself), so the
+        fallback re-roots at the session header and carries the whole
+        repaired history.
+        """
+        prefix = 0
+        for before, after in zip(original, repaired, strict=False):
+            if before is not after:
+                break
+            prefix += 1
+        by_id = {record.id: record for record in records}
+        state = project_active_branch(records)
+        if prefix and len(state.record_ids) >= prefix:
+            candidate = state.record_ids[prefix - 1]
+            if candidate in by_id:
+                try:
+                    projected = project_records(trace_to_entry(records, candidate)).transcript
+                except TreeIntegrityError:
+                    projected = []
+                if projected == original[:prefix]:
+                    return candidate, list(repaired[prefix:])
+        header = next((r for r in records if isinstance(r, SessionMetaRecord)), None)
+        return (header.id if header else None), list(repaired)
 
     # ── multi-session lifecycle ────────────────────────────────────────
 
@@ -1311,6 +1564,10 @@ class CodingSession:
             total_cost_usd=self._total_cost,
             estimated_context_tokens=self._estimate_context_tokens(),
             context_limit=self._context_limit(),
+            cache_read_tokens=self._cache_read,
+            cache_write_tokens=self._cache_write,
+            latest_prompt_tokens=self._latest_prompt,
+            latest_cache_read_tokens=self._latest_cache_read,
         )
 
     @property
@@ -1328,24 +1585,107 @@ class CodingSession:
         if record_id:
             self._record_ids.append(record_id)
         if isinstance(event.message, ModelEntry):
-            self._turn_count += 1
-            self._total_input += event.message.usage.input
-            self._total_output += event.message.usage.output
-            self._total_cost += event.message.usage.cost.total
+            self._tally(event.message)
+
+    def _tally(self, reply: ModelEntry) -> None:
+        """Fold one model reply's usage into the session totals."""
+        usage = reply.usage
+        prompt = usage.input + usage.cache_read + usage.cache_write
+        self._turn_count += 1
+        self._total_input += prompt
+        self._total_output += usage.output
+        self._total_cost += usage.cost.total
+        self._cache_read += usage.cache_read
+        self._cache_write += usage.cache_write
+        self._latest_prompt = prompt
+        self._latest_cache_read = usage.cache_read
 
     async def _run_wrapped(
         self, stream: AsyncIterator[AgentEvent]
     ) -> AsyncIterator[AgentEvent]:
-        """Wrap a harness event stream with post-run processing."""
+        """Wrap a harness event stream with post-run processing.
+
+        Two failures get one automatic continuation of the same run, with no
+        extra user message, and the intermediate run end is swallowed so the
+        caller sees a single run:
+
+        - the request overflowed the model's context window: older history
+          is compacted first (if that fails, the original error stands);
+        - a routed provider's learned backend failed before answering: the
+          pin is dropped so the router picks again.
+
+        Each recovery is tried at most once per run.
+        """
         completed = False
+        used: set[str] = set()
         try:
-            async for event in stream:
-                if isinstance(event, RunEndEvent):
-                    completed = True
-                yield event
+            while True:
+                recovery: str | None = None
+                # Events for the failed reply a recovery replaces. A reply's
+                # start is held until its outcome is known, so a recovered
+                # failure never reaches the caller as an error.
+                withheld: list[AgentEvent] = []
+                async for event in stream:
+                    if recovery is not None:
+                        # The rest of a run being recovered is not shown.
+                        withheld.append(event)
+                        continue
+                    if isinstance(event, MessageStartEvent) and isinstance(
+                        event.message, ModelEntry
+                    ):
+                        withheld = [event]
+                        continue
+                    if isinstance(event, MessageEndEvent) and isinstance(
+                        event.message, ModelEntry
+                    ):
+                        reply = event.message
+                        if "overflow" not in used and _is_context_overflow(reply):
+                            recovery = "overflow"
+                        elif "reroute" not in used and self._should_reroute(reply):
+                            recovery = "reroute"
+                        elif reply.stop_reason not in ("error", "aborted"):
+                            self._learn_route()
+                        if recovery is not None:
+                            withheld.append(event)
+                            continue
+                    for early in withheld:
+                        yield early
+                    withheld = []
+                    if isinstance(event, RunEndEvent):
+                        completed = True
+                    yield event
+                if recovery is None:
+                    for early in withheld:
+                        yield early
+                    break
+                used.add(recovery)
+                if recovery == "overflow":
+                    if not await self._compact_for_overflow():
+                        # Recovery failed: the original error is the answer.
+                        for early in withheld:
+                            yield early
+                        completed = True
+                        break
+                    notice = "Context window exceeded; compacted older history and retrying."
+                else:
+                    failed = self._route.backend
+                    self._route = RoutePin()
+                    self._apply_route()
+                    self._sync_route_to_catalog()
+                    notice = f"Inference provider {failed} failed; retrying on the router's choice."
+                yield RetryEvent(attempt=2, max_attempts=2, message=notice)
+                stream = self._harness.resume()
         finally:
             if completed:
                 await self._post_run()
+
+    async def _compact_for_overflow(self) -> bool:
+        """Compact after a context-overflow error; ``False`` if that is impossible."""
+        try:
+            await self.compact()
+        except Exception:  # noqa: BLE001 - the overflow error itself stays visible
+            return False
+        return True
 
     async def _post_run(self) -> None:
         """Housekeeping after a completed agent run."""
@@ -1392,6 +1732,9 @@ class CodingSession:
         """
         if self._vault is None:
             return None
+        if self._pending_header is not None:
+            if not await self._write_header():
+                return None
         if record.parent_id is None:
             record.parent_id = self._tip_id
         try:
@@ -1401,6 +1744,30 @@ class CodingSession:
         if advance_tip:
             self._tip_id = record.id
         return record.id
+
+    async def _write_header(self) -> bool:
+        """Write the deferred session header and index row, once."""
+        header = self._pending_header
+        assert header is not None and self._vault is not None
+        try:
+            await self._vault.append(header)
+        except Exception:  # noqa: BLE001
+            return False
+        self._pending_header = None
+        if self._catalog is not None:
+            self._catalog.upsert(replace(
+                SessionCatalog.prepare(
+                    session_id=self._session_id,
+                    vault_path=self._vault.path,
+                    cwd=header.cwd or self._cwd,
+                    model=self._model,
+                    provider=self._provider_name,
+                ),
+                title=self._title,
+                inference_provider=self._route.backend,
+                inference_provider_mode=self._route.mode,
+            ))
+        return True
 
     async def _persist_entry(self, entry: TranscriptEntry) -> str | None:
         """Append a transcript record to the vault, returning its record ID."""
@@ -1488,7 +1855,7 @@ class CodingSession:
 
     async def _cmd_stats(self, _arg: str) -> str:
         s = self.usage
-        return (
+        report = (
             f"Turns: {s.turn_count}  Messages: {s.message_count}\n"
             f"Input tokens: {s.total_input_tokens:,}  "
             f"Output tokens: {s.total_output_tokens:,}\n"
@@ -1496,6 +1863,13 @@ class CodingSession:
             f"Context: ~{s.estimated_context_tokens:,} / "
             f"{s.context_limit:,} tokens"
         )
+        latest, overall = s.latest_cache_hit_rate, s.cache_hit_rate
+        if latest is not None and overall is not None:
+            report += (
+                f"\nCache hit: latest {latest:.0%}  session {overall:.0%}  "
+                f"(read {s.cache_read_tokens:,}, written {s.cache_write_tokens:,})"
+            )
+        return report
 
     async def _cmd_name(self, arg: str) -> str:
         if not arg:
@@ -1676,6 +2050,57 @@ class CodingSession:
         lines.append("")
         lines.append("Use /skills <name> to view one, /skills reload to re-read.")
         return "\n".join(lines)
+
+    def system_sections(self) -> list[PromptSection]:
+        """The live system prompt split into attributed sections.
+
+        Sections are rebuilt from the same inputs the prompt was assembled
+        from and trusted only if they join back to the exact live text; if
+        anything drifted (an override, a changed date, an edited file) the
+        whole prompt is shown as one unattributed section rather than with
+        provenance that might be wrong. Display only: nothing here is sent to
+        the model or persisted.
+        """
+        from delta_app.instructions import prompt_sections
+
+        attributed: list[PromptSection] | None = None
+        for cwd in dict.fromkeys((self._cwd, os.getcwd())):
+            for dated in (True, False):
+                candidate = prompt_sections(
+                    tools=self._all_tools, skills=self._skills, cwd=cwd, include_date=dated,
+                )
+                if "\n\n".join(part.text for part in candidate) == self._system:
+                    attributed = candidate
+                    break
+            if attributed is not None:
+                break
+        if attributed is None:
+            attributed = [PromptSection("System prompt", "runtime-composed", self._system)]
+
+        live = self._harness.settings.system
+        if live != self._system and live.startswith(self._system + "\n\n"):
+            attributed.append(PromptSection(
+                "Plan mode", "plan mode (active)", live[len(self._system) + 2:],
+            ))
+        return attributed
+
+    def _cmd_session(self, _arg: str) -> str:
+        lines = [
+            f"Session:  {self._session_id}",
+            f"Title:    {self._title or '(untitled)'}",
+            f"Model:    {self._model}",
+            f"Provider: {self._provider_name}",
+            f"CWD:      {self._cwd}",
+        ]
+        if self._provider_name == ROUTED_PROVIDER:
+            lines.append(f"Hugging Face inference provider: {self._route.describe()}")
+        return "\n".join(lines)
+
+    def _cmd_system(self, _arg: str) -> str:
+        parts = []
+        for number, section in enumerate(self.system_sections(), start=1):
+            parts.append(f"── {number}. {section.title}  [{section.origin}]\n{section.text}")
+        return "\n\n".join(parts)
 
     async def _cmd_diag(self, _arg: str) -> str:
         return json.dumps(self.diagnostics(), indent=2)

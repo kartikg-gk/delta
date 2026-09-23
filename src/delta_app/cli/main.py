@@ -159,6 +159,15 @@ def _build_run_parser() -> argparse.ArgumentParser:
         "--repl", action="store_true",
         help="Use the line-based REPL instead of the Textual UI.",
     )
+    trust = p.add_mutually_exclusive_group()
+    trust.add_argument(
+        "--approve", "-a", action="store_true",
+        help="Load this folder's project instructions, skills and plugins for this run.",
+    )
+    trust.add_argument(
+        "--no-approve", "-na", dest="no_approve", action="store_true",
+        help="Skip this folder's project inputs for this run.",
+    )
     return p
 
 

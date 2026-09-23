@@ -162,15 +162,31 @@ class TestJsonHelpers:
 
 class TestBuildReasoningExtra:
     def test_disabled(self) -> None:
-        assert build_reasoning_extra(ReasoningPolicy()) == {}
+        assert build_reasoning_extra(ReasoningPolicy(), model="gpt-5", endpoint="chat") == {}
 
     def test_enabled_no_budget(self) -> None:
-        extra = build_reasoning_extra(ReasoningPolicy(enabled=True))
+        extra = build_reasoning_extra(ReasoningPolicy(enabled=True), model="o3", endpoint="responses")
         assert extra == {"reasoning": {"effort": "medium"}}
 
     def test_enabled_with_budget(self) -> None:
-        extra = build_reasoning_extra(ReasoningPolicy(enabled=True, budget_tokens=5000))
+        policy = ReasoningPolicy(enabled=True, budget_tokens=5000)
+        extra = build_reasoning_extra(policy, model="o3", endpoint="responses")
         assert extra["reasoning"]["effort"] == "high"
+
+    def test_chat_uses_flat_field_and_requested_level(self) -> None:
+        policy = ReasoningPolicy(enabled=True, budget_tokens=2048, effort="low")
+        assert build_reasoning_extra(policy, model="gpt-5-mini", endpoint="chat") == {
+            "reasoning_effort": "low"
+        }
+
+    def test_non_reasoning_models_get_nothing(self) -> None:
+        policy = ReasoningPolicy(enabled=True, effort="high")
+        assert build_reasoning_extra(policy, model="gpt-4.1-mini", endpoint="chat") == {}
+
+    def test_levels_beyond_the_api_are_clamped(self) -> None:
+        policy = ReasoningPolicy(enabled=True, effort="xhigh")
+        extra = build_reasoning_extra(policy, model="openai/gpt-oss-120b", endpoint="chat")
+        assert extra == {"reasoning_effort": "high"}
 
 
 class TestParseRetryAfter:

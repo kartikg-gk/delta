@@ -15,6 +15,16 @@ from delta_model.scripted import ReplayProvider
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+async def _begin(session) -> None:
+    """Send one prompt: a session is only saved once something happens in it."""
+    async def _no_title() -> str:
+        return ""
+
+    session.auto_name = _no_title
+    async for _ in session.submit("hello"):
+        pass
+
+
 
 def _make_reply(text: str = "Hello!") -> ModelEntry:
     return ModelEntry(
@@ -77,6 +87,7 @@ class TestCreate:
             system="You are helpful.",
             cwd="/project",
         )
+        await _begin(session)
 
         meta = mgr.get(session.session_id)
         assert meta is not None
@@ -95,6 +106,7 @@ class TestCreate:
             system="You are helpful.",
             session_id="custom-id",
         )
+        await _begin(session)
         assert session.session_id == "custom-id"
         assert mgr.get("custom-id") is not None
         await session.shutdown()
@@ -114,6 +126,7 @@ class TestResume:
             model="test-model",
             system="You are helpful.",
         )
+        await _begin(session)
         sid = session.session_id
         await session.shutdown()
 
@@ -154,6 +167,7 @@ class TestResumeLatest:
             system="You are helpful.",
             cwd="/my/project",
         )
+        await _begin(session)
         sid = session.session_id
         await session.shutdown()
 
@@ -200,6 +214,7 @@ class TestListSessions:
             system="You are helpful.",
             cwd="/a",
         )
+        await _begin(s1)
         s2 = await mgr.create(
             provider=_make_provider(),
             provider_name="test",
@@ -207,6 +222,7 @@ class TestListSessions:
             system="You are helpful.",
             cwd="/b",
         )
+        await _begin(s2)
 
         summaries = mgr.list_sessions()
         assert len(summaries) == 2
@@ -230,6 +246,7 @@ class TestListSessions:
             model="test-model",
             system="You are helpful.",
         )
+        await _begin(s1)
         import time
         time.sleep(0.01)
         s2 = await mgr.create(
@@ -238,6 +255,7 @@ class TestListSessions:
             model="test-model",
             system="You are helpful.",
         )
+        await _begin(s2)
 
         summaries = mgr.list_sessions()
         assert summaries[0].session_id == s2.session_id
@@ -295,6 +313,7 @@ class TestLookup:
             model="test-model",
             system="You are helpful.",
         )
+        await _begin(session)
         assert mgr.get(session.session_id) is not None
         assert mgr.get("nonexistent") is None
         await session.shutdown()
@@ -320,6 +339,7 @@ class TestLookup:
             system="You are helpful.",
             cwd="/project-a",
         )
+        await _begin(s2)
 
         meta = mgr.latest_for_cwd("/project-a")
         assert meta is not None
@@ -342,6 +362,7 @@ class TestExport:
             model="test-model",
             system="You are helpful.",
         )
+        await _begin(session)
         sid = session.session_id
         await session.shutdown()
 

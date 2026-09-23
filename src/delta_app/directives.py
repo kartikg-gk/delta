@@ -484,6 +484,11 @@ def _cmd_diag(ctx: CommandContext) -> CommandResult:
     return _ok(diag_requested=True)
 
 
+def _cmd_system(ctx: CommandContext) -> CommandResult:
+    """Show the active system prompt with each section's source."""
+    return _ok(extras={"system_requested": True})
+
+
 def _cmd_skills(ctx: CommandContext) -> CommandResult:
     """List available skills."""
     return _ok(extras={"skills_requested": True})
@@ -705,6 +710,13 @@ def build_default_registry() -> CommandRegistry:
             usage="/diag",
             aliases=("debug",),
             search_terms=("diagnostics", "inspect"),
+        ),
+        SlashCommand(
+            name="system",
+            description="Show the system prompt and where each part came from",
+            handler=_cmd_system,
+            usage="/system",
+            search_terms=("prompt", "instructions", "provenance", "agents.md"),
         ),
         SlashCommand(
             name="skills",

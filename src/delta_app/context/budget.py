@@ -236,16 +236,16 @@ def estimate_transcript_tokens(
 ) -> int:
     """Sum the per-entry token estimates for the full transcript.
 
-    When the transcript contains a ``ModelEntry`` with reported
-    ``usage.input``, that value subsumes all prior entries.  We use the
-    most recent such value as a floor and add estimates only for entries
-    that come after it.
+    When the transcript contains a ``ModelEntry`` with reported usage, that
+    request's full prompt size subsumes all prior entries.  We use the most
+    recent such value as a floor and add estimates only for entries that come
+    after it.
     """
     last_input = 0
     last_idx = -1
     for i, entry in enumerate(transcript):
-        if isinstance(entry, ModelEntry) and entry.usage.input > 0:
-            last_input = entry.usage.input
+        if isinstance(entry, ModelEntry) and _prompt_tokens(entry) > 0:
+            last_input = _prompt_tokens(entry)
             last_idx = i
 
     if last_idx < 0:
@@ -257,10 +257,20 @@ def estimate_transcript_tokens(
     return last_input + tail
 
 
+def _prompt_tokens(entry: ModelEntry) -> int:
+    """Full prompt size of the request that produced ``entry``.
+
+    ``usage.input`` counts only fresh input; tokens served from or written to
+    the prompt cache are reported separately but still occupy the window.
+    """
+    usage = entry.usage
+    return usage.input + usage.cache_read + usage.cache_write
+
+
 def _has_reported_usage(transcript: Sequence[TranscriptEntry]) -> bool:
     """Whether any turn carries provider-reported input token counts."""
     return any(
-        isinstance(entry, ModelEntry) and entry.usage.input > 0 for entry in transcript
+        isinstance(entry, ModelEntry) and _prompt_tokens(entry) > 0 for entry in transcript
     )
 
 
@@ -349,6 +359,27 @@ class CompactionPlan:
     """Text of the prior summary, or empty string."""
 
 
+def _turn_boundary(transcript: Sequence[TranscriptEntry], split: int) -> int:
+    """Move *split* so the kept part starts a whole user turn.
+
+    Back to the user message that opens the turn *split* falls in, so the
+    kept part never shrinks below the floor and the newest prompt is never
+    summarised away with its reply. With a single prompt at the very start,
+    keep from the first entry that is not a tool result, so no result is
+    kept without its call.
+    """
+    opening = max(
+        (i for i, e in enumerate(transcript[: split + 1]) if isinstance(e, HumanEntry)),
+        default=0,
+    )
+    if opening > 0:
+        return opening
+    for index in range(max(split, 0), len(transcript)):
+        if not isinstance(transcript[index], ToolOutcomeEntry):
+            return index
+    return len(transcript)
+
+
 def plan_compaction(
     transcript: Sequence[TranscriptEntry],
     record_ids: Sequence[str],
@@ -370,8 +401,8 @@ def plan_compaction(
     # Never keep more than we have.
     keep_count = min(keep_count, len(transcript) - 1)
 
-    split = len(transcript) - keep_count
-    if split < 1:
+    split = _turn_boundary(transcript, len(transcript) - keep_count)
+    if split < 1 or split >= len(transcript):
         return None
 
     to_summarize = tuple(transcript[:split])

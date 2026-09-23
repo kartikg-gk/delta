@@ -38,6 +38,7 @@ class ReplayProvider:
         messages: list[TranscriptEntry],
         tools: list[ToolSpec],
         signal: CancelToken | None = None,
+        cache_key: str | None = None,
     ) -> AsyncIterator[WireEvent]:
 
         self.calls.append(

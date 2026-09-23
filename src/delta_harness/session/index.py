@@ -13,11 +13,13 @@ only tracks the metadata needed to list, find, and resume sessions.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from time import time
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from delta_harness.session.store import jsonl_lines
 
 # ---------------------------------------------------------------------------
 # Serialization model
@@ -37,6 +39,8 @@ class SessionMetaWire(BaseModel):
     title: str | None = None
     created_at: float = Field(default_factory=time)
     updated_at: float = Field(default_factory=time)
+    inference_provider: str | None = None
+    inference_provider_mode: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +60,9 @@ class SessionMeta:
     title: str | None
     created_at: float
     updated_at: float
+    # Backend pin for routed providers, and whether it was learned or chosen.
+    inference_provider: str | None = None
+    inference_provider_mode: str | None = None
 
     def to_wire(self) -> SessionMetaWire:
         """Convert to a serializable wire model."""
@@ -68,6 +75,8 @@ class SessionMeta:
             title=self.title,
             created_at=self.created_at,
             updated_at=self.updated_at,
+            inference_provider=self.inference_provider,
+            inference_provider_mode=self.inference_provider_mode,
         )
 
 
@@ -82,6 +91,8 @@ def _wire_to_meta(wire: SessionMetaWire) -> SessionMeta:
         title=wire.title,
         created_at=wire.created_at,
         updated_at=wire.updated_at,
+        inference_provider=wire.inference_provider,
+        inference_provider_mode=wire.inference_provider_mode,
     )
 
 
@@ -182,16 +193,7 @@ class SessionCatalog:
         existing = self.get(session_id)
         if existing is None:
             return None
-        refreshed = SessionMeta(
-            session_id=existing.session_id,
-            vault_path=existing.vault_path,
-            cwd=existing.cwd,
-            model=existing.model,
-            provider=existing.provider,
-            title=existing.title,
-            created_at=existing.created_at,
-            updated_at=time(),
-        )
+        refreshed = replace(existing, updated_at=time())
         self.upsert(refreshed)
         return refreshed
 
@@ -228,7 +230,7 @@ class SessionCatalog:
             return {}
 
         result: dict[str, SessionMeta] = {}
-        for line in self._path.read_text(encoding="utf-8").splitlines():
+        for line in jsonl_lines(self._path.read_text(encoding="utf-8")):
             stripped = line.strip()
             if not stripped:
                 continue

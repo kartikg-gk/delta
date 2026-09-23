@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from dataclasses import replace
 
 from delta_harness.provider.base import ModelProvider
 from delta_model.settings import (
@@ -30,10 +31,10 @@ from delta_model.settings import (
 # Known provider identifiers
 # ---------------------------------------------------------------------------
 
-_KNOWN_PROVIDERS = ("anthropic", "openai", "openrouter", "ollama", "scripted")
+_KNOWN_PROVIDERS = ("anthropic", "openai", "openrouter", "ollama", "huggingface", "scripted")
 
 # OpenAI-compatible backends reuse the OpenAI adapter with a different base URL.
-_OPENAI_COMPATIBLE = ("openai", "openrouter", "ollama")
+_OPENAI_COMPATIBLE = ("openai", "openrouter", "ollama", "huggingface")
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +123,9 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         return _build_anthropic(profile)
 
     if resolved in _OPENAI_COMPATIBLE:
-        profile = load_openai_profile()
+        # Named for the chosen provider, so replies, stats, and errors say
+        # "openrouter" or "ollama" rather than the shared adapter's "openai".
+        profile = replace(load_openai_profile(), name=resolved)
         return _build_openai(profile)
 
     if resolved == "scripted":

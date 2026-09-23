@@ -16,6 +16,16 @@ from delta_harness.session.index import (
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
+async def _begin(session) -> None:
+    """Send one prompt: a session is only saved once something happens in it."""
+    async def _no_title() -> str:
+        return ""
+
+    session.auto_name = _no_title
+    async for _ in session.submit("hello"):
+        pass
+
+
 
 def _make_meta(
     session_id: str = "abc123",
@@ -312,6 +322,7 @@ class TestCodingSessionIntegration:
             system="You are helpful.",
             sessions_dir=tmp_path,
         )
+        await _begin(session)
 
         # Catalog should contain the session
         catalog = SessionCatalog(tmp_path)
@@ -319,7 +330,7 @@ class TestCodingSessionIntegration:
         assert meta is not None
         assert meta.model == "test-model"
         assert meta.provider == "test"
-        assert meta.title is None
+        assert meta.title == "hello"  # provisional title from the first prompt
         await session.shutdown()
 
     @pytest.mark.asyncio
@@ -353,6 +364,7 @@ class TestCodingSessionIntegration:
             system="You are helpful.",
             sessions_dir=tmp_path,
         )
+        await _begin(session)
         sid = session.session_id
 
         # Record original timestamp

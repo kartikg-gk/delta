@@ -1,7 +1,7 @@
 [project]
 name = "deltaa"
-version = "0.1.0"
-description = "A small, readable coding-agent harness."
+version = "0.2.0"
+description = "A minimal coding agent harness in Python, inspired by pi (TypeScript)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
@@ -19,8 +19,8 @@ classifiers = [
 ]
 dependencies = [
     "pydantic>=2.7",
-    "httpx>=0.27",
-    "textual>=0.80",
+    "httpx[socks]>=0.27",
+    "textual>=8.2.8",
 ]
 
 [project.urls]

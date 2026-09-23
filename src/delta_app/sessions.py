@@ -27,7 +27,7 @@ from delta_harness.contracts.tooling import ToolSpec
 from delta_harness.provider.base import ModelProvider
 from delta_harness.session.index import SessionCatalog, SessionMeta
 from delta_harness.session.records import SessionRecord, TranscriptRecord
-from delta_harness.session.store import JsonlVault
+from delta_harness.session.store import JsonlVault, jsonl_lines
 
 # ---------------------------------------------------------------------------
 # Summary returned by list_sessions
@@ -204,7 +204,7 @@ class SessionManager:
             title: str | None = None
             n_messages = 0
             try:
-                for line in path.read_text(encoding="utf-8").splitlines():
+                for line in jsonl_lines(path.read_text(encoding="utf-8")):
                     stripped = line.strip()
                     if not stripped:
                         continue

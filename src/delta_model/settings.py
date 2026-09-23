@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Protocol
+from typing import Literal, Protocol
 
 
 class ConfigError(Exception):
@@ -141,6 +141,9 @@ class ReasoningPolicy:
 
     enabled: bool = False
     budget_tokens: int | None = None
+    # Effort-style level (``minimal``/``low``/``medium``/``high``…) for
+    # providers that take a named effort instead of a token budget.
+    effort: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +157,11 @@ class AnthropicProfile:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     reasoning: ReasoningPolicy = field(default_factory=ReasoningPolicy)
     resolver: CredentialResolver | None = None
+    # Prompt-cache lifetime: ``none`` sends no cache markers, ``short`` uses the
+    # provider's default lifetime, ``long`` asks for the extended one. ``None``
+    # decides from the endpoint: first-party hosts get ``short``; gateways that
+    # merely speak the protocol get ``none``, since they may reject the markers.
+    cache_retention: Literal["none", "short", "long"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +175,10 @@ class OpenAIProfile:
     retry: RetryPolicy = field(default_factory=RetryPolicy)
     reasoning: ReasoningPolicy = field(default_factory=ReasoningPolicy)
     resolver: CredentialResolver | None = None
+    # Send the conversation id as a prompt-cache routing hint. ``None`` enables
+    # it only for the first-party endpoint; compatible gateways do not all
+    # accept the extra field and header, so they must opt in explicitly.
+    cache_affinity: bool | None = None
 
 
 

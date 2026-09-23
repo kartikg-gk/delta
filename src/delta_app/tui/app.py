@@ -18,6 +18,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Footer, Header
 
 from delta_app.tui.adapter import (
+    RetryNotice,
     SessionBridge,
     TextDelta,
     ToolFinished,
@@ -51,6 +52,19 @@ def build_id() -> str:
         digest.update(_CSS_PATH.read_bytes())
     return digest.hexdigest()[:7]
 
+
+
+def _is_registered_command(text: str) -> bool:
+    """Whether *text* names a slash command rather than being a prompt.
+
+    Skills, prompt templates, unknown names, and absolute paths such as
+    ``/tmp/shot.png`` are prompts: the session expands the first two.
+    """
+    from delta_app.conversation import COMMAND_REGISTRY
+    from delta_app.directives import parse_command
+
+    parsed = parse_command(text)
+    return parsed is not None and COMMAND_REGISTRY.get(parsed[0]) is not None
 
 class DeltaApp(App[None]):
     """Delta's terminal UI."""
@@ -151,7 +165,7 @@ class DeltaApp(App[None]):
             )
             return
 
-        if text.startswith("/"):
+        if _is_registered_command(text):
             await self._run_command(text)
             return
 
@@ -296,6 +310,8 @@ class DeltaApp(App[None]):
                     transcript.finish_tool(
                         update.call_id, update.output, is_error=update.is_error,
                     )
+                elif isinstance(update, RetryNotice):
+                    transcript.add_notice(update.message)
                 elif isinstance(update, TurnFinished):
                     transcript.finish_assistant(update.text)
                     if update.error:
@@ -331,8 +347,11 @@ class DeltaApp(App[None]):
 
 async def run_app(ns: argparse.Namespace) -> int:
     """Build the shared runtime session and run the TUI over it."""
-    from delta_app.runtime import build_session
+    from delta_app.runtime import build_session, settle_project_trust
+    from delta_app.tui.trust_dialog import ask_in_dialog
 
+    # Settled before the session exists: its answer decides what gets loaded.
+    await settle_project_trust(ns, ask=ask_in_dialog)
     bridge = SessionBridge(await build_session(ns))
     app = DeltaApp(bridge)
     try:

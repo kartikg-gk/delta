@@ -116,6 +116,9 @@ class DeltaPaths:
 
     home: Path = field(default_factory=_resolve_home)
     project: Path = field(default_factory=Path.cwd)
+    # False when the project folder is not trusted: search paths then leave
+    # out every project-local location and only user resources load.
+    project_enabled: bool = True
 
     # ── user home locations ───────────────────────────────────────────
 
@@ -211,15 +214,24 @@ def default_paths(
     Falls back to environment variables and ``Path.cwd()`` when not
     specified.
     """
+    from delta_app.trust import project_inputs_allowed
+
+    root = project or Path.cwd()
     return DeltaPaths(
         home=home or _resolve_home(),
-        project=project or Path.cwd(),
+        project=root,
+        project_enabled=project_inputs_allowed(root),
     )
 
 
 # ---------------------------------------------------------------------------
 # Resource search paths — precedence-ordered directory lists
 # ---------------------------------------------------------------------------
+
+
+def _project_only(paths: DeltaPaths, *locations: Path) -> tuple[Path, ...]:
+    """``locations`` when project inputs are enabled, otherwise nothing."""
+    return locations if paths.project_enabled else ()
 
 
 def skill_search_paths(paths: DeltaPaths) -> list[Path]:
@@ -233,8 +245,7 @@ def skill_search_paths(paths: DeltaPaths) -> list[Path]:
     named resource, so the first directory wins on name collisions.
     """
     return _dedupe_paths([
-        paths.project_agents_skills,
-        paths.project_skills,
+        *_project_only(paths, paths.project_agents_skills, paths.project_skills),
         paths.agents_skills,
         paths.user_skills,
     ])
@@ -246,8 +257,7 @@ def prompt_search_paths(paths: DeltaPaths) -> list[Path]:
     Same four-level precedence as skills.
     """
     return _dedupe_paths([
-        paths.project_agents_prompts,
-        paths.project_prompts,
+        *_project_only(paths, paths.project_agents_prompts, paths.project_prompts),
         paths.agents_prompts,
         paths.user_prompts,
     ])
@@ -259,7 +269,7 @@ def theme_search_paths(paths: DeltaPaths) -> list[Path]:
     Themes are Delta-specific — only ``.delta`` directories are searched.
     """
     return _dedupe_paths([
-        paths.project_themes,
+        *_project_only(paths, paths.project_themes),
         paths.user_themes,
     ])
 
@@ -282,9 +292,10 @@ def resource_search_paths(
         When ``True``, skip ``.agents`` directories (used for themes).
     """
     dirs: list[Path] = []
-    if not delta_only:
-        dirs.append(paths.project / ".agents" / resource_type)
-    dirs.append(paths.project / ".delta" / resource_type)
+    if paths.project_enabled:
+        if not delta_only:
+            dirs.append(paths.project / ".agents" / resource_type)
+        dirs.append(paths.project / ".delta" / resource_type)
     if not delta_only:
         dirs.append(paths.agents_home / resource_type)
     dirs.append(paths.home / resource_type)
