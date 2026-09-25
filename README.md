@@ -1,9 +1,6 @@
 # Delta
 
-A minimal coding agent harness in Python, inspired by [pi](https://github.com/earendil-works/pi) (TypeScript). Delta runs a language model in a
-loop with file and shell tools, saves every session so you can resume or branch it,
-and ships both a terminal UI and a scriptable one-shot mode.
-
+Delta is a minimal coding agent harness in Python built around a small, inspectable model–tool loop. It provides filesystem and shell tools, multi-provider model support, customizable tools, skills, prompts and hooks, and clean interfaces for extending agent behavior without changing the core runtime. Delta can be used interactively from the terminal, scripted for one-shot tasks, or embedded into larger agent and evaluation workflows.
 Requires Python 3.12 or newer.
 
 ## Install
