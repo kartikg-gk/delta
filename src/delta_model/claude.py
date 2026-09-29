@@ -24,6 +24,7 @@ Usage::
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from dataclasses import replace
@@ -57,6 +58,7 @@ from delta_model.transport.client import build_async_client
 from delta_model.transport.faults import format_http_error
 
 _API_VERSION = "2023-06-01"
+_TRUNCATED = "The response stream ended before the reply was complete."
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +471,19 @@ class AnthropicProvider:
                                 held.clear()
                             yield wire_event
 
+                retry_reason = f"a transient {failure_kind}"
+                if not passing_failure and not machine.finished:
+                    # The connection closed before the message ended. Nothing
+                    # shown yet: try again. Otherwise keep the partial reply
+                    # but mark it failed rather than passing it off as whole.
+                    if not committed and attempt < retry.max_retries:
+                        passing_failure = True
+                        retry_reason = "a stream that ended early"
+                    else:
+                        for wire_event in [*held, *machine.seal_truncated(_TRUNCATED)]:
+                            yield wire_event
+                        return
+
                 if not passing_failure:
                     for wire_event in [*held, *machine.seal()]:
                         yield wire_event
@@ -477,7 +492,7 @@ class AnthropicProvider:
                 delay = compute_delay(attempt, max_delay_seconds=retry.max_delay_seconds)
                 yield build_retry_event(
                     attempt=attempt, max_retries=retry.max_retries,
-                    delay_seconds=delay, reason=f"a transient {failure_kind}",
+                    delay_seconds=delay, reason=retry_reason,
                 )
                 alive = await pause_for_retry(delay, signal=signal)
                 if not alive:
@@ -505,8 +520,11 @@ class AnthropicProvider:
                     yield self._cancelled(model)
                     return
 
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
-                if attempt >= retry.max_retries:
+            except (httpx.TransportError, ssl.SSLError) as exc:
+                # TLS failures after the handshake surface as a raw SSLError.
+                # Once content has reached the caller a retry would repeat it,
+                # so the reply ends with the error instead.
+                if committed or attempt >= retry.max_retries:
                     yield self._network_fault(model, exc)
                     return
 

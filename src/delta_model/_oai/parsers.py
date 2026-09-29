@@ -325,6 +325,13 @@ class ResponsesDecoder:
                     signals += self._resolve(data.get("output_index", 0), item.get("arguments"))
 
             # --- completion ---------------------------------------------------
+            case "response.incomplete":
+                # Ended early by a limit (e.g. max output tokens), not cut off.
+                for idx in sorted(self._tools):
+                    signals += self._resolve(idx, None)
+                usage = data.get("response", {}).get("usage")
+                signals.append(Finished(finish_reason="length", usage=usage))
+
             case "response.completed":
                 for idx in sorted(self._tools):
                     signals += self._resolve(idx, None)

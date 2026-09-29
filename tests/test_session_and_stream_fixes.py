@@ -4,6 +4,7 @@ resume, slash input in the terminal UI, and Responses stream edge cases."""
 from __future__ import annotations
 
 import json
+import ssl
 from pathlib import Path
 
 import httpx
@@ -274,3 +275,221 @@ def test_compatible_providers_are_labelled_by_their_own_name(
     monkeypatch.setenv("OPENAI_API_KEY", "k")
     provider = resolve_provider("openrouter")
     assert provider._profile.name == "openrouter"  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# Transport and TLS failures
+# ---------------------------------------------------------------------------
+
+_CHAT_OK = (
+    'data: {"choices":[{"index":0,"delta":{"content":"hi"}}]}\n\n'
+    'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    "data: [DONE]\n\n"
+)
+
+
+def _chat_provider(handler) -> OpenAIProvider:  # type: ignore[no-untyped-def]
+    provider = OpenAIProvider(OpenAIProfile(
+        name="openai",
+        credential=Credential(api_key="k", base_url="https://api.openai.com/v1"),
+        retry=RetryPolicy(max_retries=2, max_delay_seconds=0.01),
+    ))
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return provider
+
+
+@pytest.mark.parametrize("error", [
+    ssl.SSLError(1, "[SSL: SSLV3_ALERT_BAD_RECORD_MAC] bad record mac"),
+    httpx.RemoteProtocolError("Server disconnected without sending a response."),
+    httpx.WriteError("write failed"),
+])
+async def test_transport_errors_before_output_are_retried(error: Exception) -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        if len(calls) == 1:
+            raise error
+        return httpx.Response(200, text=_CHAT_OK)
+
+    events = [e async for e in _chat_provider(handler).stream_response(
+        model="gpt-4o", system="s", messages=[HumanEntry(content="q")], tools=[],
+    )]
+    assert isinstance(events[-1], StreamCloseEvent)
+    assert events[-1].message.text == "hi" and len(calls) == 2
+
+
+async def test_tls_error_after_output_ends_the_reply_without_a_retry() -> None:
+    calls: list[int] = []
+
+    class Broken(httpx.AsyncByteStream):
+        async def __aiter__(self):  # type: ignore[no-untyped-def]
+            yield b'data: {"choices":[{"index":0,"delta":{"content":"half"}}]}\n\n'
+            raise ssl.SSLError(1, "bad record mac")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, stream=Broken())
+
+    events = [e async for e in _chat_provider(handler).stream_response(
+        model="gpt-4o", system="s", messages=[HumanEntry(content="q")], tools=[],
+    )]
+    reply = events[-1].error  # type: ignore[union-attr]
+    assert reply.stop_reason == "error" and "bad record mac" in (reply.error_message or "")
+    assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Context size after compaction
+# ---------------------------------------------------------------------------
+
+
+def test_usage_from_before_a_compaction_is_not_the_anchor() -> None:
+    from delta_app.context.budget import estimate_transcript_tokens
+    from delta_harness.contracts.transcript import PruneSummaryEntry, UsageStats
+
+    old = ModelEntry(content=[TextSegment(text="kept")], stop_reason="stop",
+                     usage=UsageStats(input=50_000), timestamp=1_000)
+    summary = PruneSummaryEntry(summary="short", tokens_before=0, timestamp=2_000)
+    assert estimate_transcript_tokens([summary, old]) < 1_000
+    fresh = ModelEntry(content=[TextSegment(text="new")], stop_reason="stop",
+                       usage=UsageStats(input=700), timestamp=3_000)
+    assert estimate_transcript_tokens([summary, old, fresh]) == 700
+
+
+def test_failed_reply_usage_is_not_the_anchor() -> None:
+    from delta_app.context.budget import estimate_transcript_tokens
+    from delta_harness.contracts.transcript import UsageStats
+
+    failed = ModelEntry(stop_reason="error", error_message="x", usage=UsageStats(input=90_000))
+    assert estimate_transcript_tokens([HumanEntry(content="q"), failed]) < 1_000
+
+
+def test_replayed_compaction_keeps_its_own_time() -> None:
+    from delta_harness.session.records import PruneRecord, TranscriptRecord
+    from delta_harness.session.replay import project_records
+
+    first = TranscriptRecord(message=HumanEntry(content="a"))
+    prune = PruneRecord(summary="s", replaces_entry_ids=[first.id], timestamp=1_700_000_020.0)
+    state = project_records([first, prune])
+    assert state.transcript[0].timestamp == 1_700_000_020_000
+
+
+# ---------------------------------------------------------------------------
+# No naming request after a failed run
+# ---------------------------------------------------------------------------
+
+
+async def test_failed_run_does_not_ask_the_provider_for_a_title(tmp_path: Path) -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(503, text="busy")
+
+    session = await CodingSession.create(
+        provider=_chat_provider(handler), provider_name="openai", model="gpt-4o",
+        system="s", sessions_dir=tmp_path,
+    )
+    _ = [e async for e in session.submit("hello")]
+    assert len(calls) == 3
+    assert session.title == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Streams that close before the response ends
+# ---------------------------------------------------------------------------
+
+_TRUNC = "The response stream ended before the reply was complete."
+
+
+def _anthropic_provider(handler):  # type: ignore[no-untyped-def]
+    from delta_model.claude import AnthropicProvider
+    from delta_model.settings import AnthropicProfile
+
+    provider = AnthropicProvider(AnthropicProfile(
+        name="anthropic",
+        credential=Credential(api_key="k", base_url="https://api.anthropic.com"),
+        retry=RetryPolicy(max_retries=1, max_delay_seconds=0.01),
+    ))
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    return provider
+
+
+def _a(name: str, data: dict) -> str:
+    return f"event: {name}\ndata: {json.dumps(data)}\n\n"
+
+
+_A_START = _a("message_start", {"type": "message_start",
+                                "message": {"id": "m", "model": "c", "usage": {}}})
+_A_TEXT = (
+    _a("content_block_start", {"type": "content_block_start", "index": 0,
+                               "content_block": {"type": "text", "text": ""}})
+    + _a("content_block_delta", {"type": "content_block_delta", "index": 0,
+                                 "delta": {"type": "text_delta", "text": "half"}})
+)
+_A_END = (
+    _a("content_block_stop", {"type": "content_block_stop", "index": 0})
+    + _a("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                           "usage": {"output_tokens": 1}})
+    + _a("message_stop", {"type": "message_stop"})
+)
+
+
+async def _last(provider, model: str):  # type: ignore[no-untyped-def]
+    events = [e async for e in provider.stream_response(
+        model=model, system="s", messages=[HumanEntry(content="q")], tools=[],
+    )]
+    return events[-1]
+
+
+async def test_anthropic_empty_close_is_retried() -> None:
+    bodies = ["", _A_START + _A_TEXT + _A_END]
+    last = await _last(_anthropic_provider(lambda r: httpx.Response(200, text=bodies.pop(0))),
+                       "claude")
+    assert isinstance(last, StreamCloseEvent) and last.message.text == "half"
+
+
+async def test_anthropic_cut_mid_reply_fails_and_keeps_the_text() -> None:
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, text=_A_START + _A_TEXT)
+
+    last = await _last(_anthropic_provider(handler), "claude")
+    assert last.error.stop_reason == "error" and last.error.error_message == _TRUNC
+    assert last.error.text == "half" and len(calls) == 1
+
+
+async def test_openai_cut_mid_reply_fails_and_keeps_the_text() -> None:
+    body = 'data: {"choices":[{"index":0,"delta":{"content":"half"}}]}\n\n'
+    last = await _last(_chat_provider(lambda r: httpx.Response(200, text=body)), "gpt-4o")
+    assert last.error.error_message == _TRUNC and last.error.text == "half"
+
+
+async def test_openai_empty_close_is_retried() -> None:
+    bodies = ["", _CHAT_OK]
+    last = await _last(_chat_provider(lambda r: httpx.Response(200, text=bodies.pop(0))),
+                       "gpt-4o")
+    assert isinstance(last, StreamCloseEvent) and last.message.text == "hi"
+
+
+async def test_finish_reason_without_done_still_completes() -> None:
+    body = (
+        'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\n'
+        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+    )
+    last = await _last(_chat_provider(lambda r: httpx.Response(200, text=body)), "gpt-4o")
+    assert isinstance(last, StreamCloseEvent) and last.message.text == "ok"
+
+
+async def test_responses_incomplete_is_a_length_stop_not_a_cut() -> None:
+    reply = await _responses(_frames(
+        {"type": "response.output_text.delta", "delta": "long"},
+        {"type": "response.incomplete",
+         "response": {"status": "incomplete",
+                      "incomplete_details": {"reason": "max_output_tokens"}}},
+        named=True,
+    ))
+    assert reply.stop_reason == "length" and reply.text == "long"

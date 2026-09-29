@@ -1,6 +1,6 @@
 [project]
 name = "deltaa"
-version = "0.2.0"
+version = "0.2.1"
 description = "A minimal coding agent harness in Python, inspired by pi (TypeScript)."
 readme = "README.md"
 requires-python = ">=3.12"

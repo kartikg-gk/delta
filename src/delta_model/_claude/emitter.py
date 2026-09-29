@@ -150,6 +150,9 @@ class ResponseMachine:
         self._response_id: str | None = None
         self._response_model: str | None = None
         self._halt: str = "stop"
+        # Whether the server said the message is over (a stop reason or
+        # `message_stop`). A stream that closes without it was cut off.
+        self._stop_seen = False
 
         # Token accounting
         self._input_tokens = 0
@@ -214,6 +217,7 @@ class ResponseMachine:
             case "message_delta":
                 return self._on_message_delta(data)
             case "message_stop":
+                self._stop_seen = True
                 return self.seal()
             case "ping":
                 return []
@@ -221,6 +225,20 @@ class ResponseMachine:
                 return self._on_error(data)
             case _:
                 return []
+
+    @property
+    def finished(self) -> bool:
+        """Whether the response ended properly or already failed."""
+        return self._stop_seen or self._phase == Phase.SEALED
+
+    def seal_truncated(self, detail: str) -> list[WireEvent]:
+        """End a response whose stream closed early, keeping what arrived."""
+        if self._phase == Phase.SEALED:
+            return []
+        self._phase = Phase.SEALED
+        self._halt = "error"
+        message = self._snapshot().model_copy(update={"error_message": detail})
+        return [StreamFaultEvent(reason="error", error=message)]
 
     def seal(self) -> list[WireEvent]:
         """Emit the terminal event if the machine has not already been sealed."""
@@ -365,6 +383,7 @@ class ResponseMachine:
         stop = delta.get("stop_reason")
         if stop:
             self._halt = _map_stop_reason(stop)
+            self._stop_seen = True
 
         usage = data.get("usage", {})
         out = usage.get("output_tokens")

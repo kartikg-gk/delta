@@ -243,10 +243,20 @@ def estimate_transcript_tokens(
     """
     last_input = 0
     last_idx = -1
+    # A reply's usage describes the history it was sent with. Compaction puts
+    # a newer summary in front of older replies, so a reply older than
+    # anything before it describes a history that no longer exists.
+    newest_before = -1
     for i, entry in enumerate(transcript):
-        if isinstance(entry, ModelEntry) and _prompt_tokens(entry) > 0:
+        if (
+            isinstance(entry, ModelEntry)
+            and entry.timestamp >= newest_before
+            and entry.stop_reason not in ("error", "aborted")
+            and _prompt_tokens(entry) > 0
+        ):
             last_input = _prompt_tokens(entry)
             last_idx = i
+        newest_before = max(newest_before, entry.timestamp)
 
     if last_idx < 0:
         # No provider-reported usage at all — estimate everything.

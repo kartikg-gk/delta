@@ -1698,8 +1698,16 @@ class CodingSession:
         # then re-summarise once the conversation has grown enough that the
         # opening prompt no longer describes it. A provisional title (derived
         # from the first prompt) does not count as named.
-        entries = len(self._harness.transcript)
-        if entries >= 2 and (not self._named or self._should_rename(entries)):
+        # After a failed or stopped run the provider just gave up; asking it
+        # for a title would only repeat that wait. The provisional title stays.
+        transcript = self._harness.transcript
+        failed = (
+            bool(transcript)
+            and isinstance(transcript[-1], ModelEntry)
+            and transcript[-1].stop_reason in ("error", "aborted")
+        )
+        entries = len(transcript)
+        if not failed and entries >= 2 and (not self._named or self._should_rename(entries)):
             try:
                 await self.auto_name()
                 self._named_at = entries

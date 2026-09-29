@@ -82,6 +82,8 @@ async def _read_sse(response: httpx.Response) -> AsyncIterator[ServerSentEvent]:
             if data_lines:
                 payload = "\n".join(data_lines)
                 if payload == "[DONE]":
+                    # Passed on so the caller knows the stream ended properly.
+                    yield ServerSentEvent(event="", data=payload)
                     return
                 yield ServerSentEvent(event=event_type, data=payload)
                 event_type = ""

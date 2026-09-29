@@ -25,6 +25,7 @@ Usage::
 
 from __future__ import annotations
 
+import ssl
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from dataclasses import replace
@@ -42,7 +43,13 @@ from delta_model._oai.helpers import (
     try_parse_json,
 )
 from delta_model._oai.normalize import EventAssembler
-from delta_model._oai.parsers import ChatDecoder, ParseFault, ResponsesDecoder, StreamDecoder
+from delta_model._oai.parsers import (
+    ChatDecoder,
+    Finished,
+    ParseFault,
+    ResponsesDecoder,
+    StreamDecoder,
+)
 from delta_model._oai.payloads import build_chat_payload, build_responses_payload
 from delta_model._oai.transport import HttpStreamError, MalformedPayload, open_event_stream
 from delta_model.settings import Credential, OpenAIProfile, ReasoningPolicy
@@ -54,6 +61,8 @@ _FIRST_PARTY_HOST = "api.openai.com"
 # Routers that front several backends name the one that answered here.
 _SERVED_BY_HEADER = "x-inference-provider"
 _ROUTING_KEY_LIMIT = 64
+
+_TRUNCATED = "The response stream ended before the reply was complete."
 
 
 class OpenAIProvider:
@@ -210,12 +219,18 @@ class OpenAIProvider:
                 committed = False
                 passing_failure = False
                 failure_kind = ""
+                # Set once the server ends the response properly: `[DONE]`,
+                # a finish reason, or a terminal Responses event.
+                finished = False
                 try:
                     async with aclosing(open_event_stream(
                         self._client, url, payload, headers, signal=signal,
                         on_accept=self._note_server,
                     )) as events:
                         async for sse in events:
+                            if sse.data == "[DONE]":
+                                finished = True
+                                continue
                             data = try_parse_json(sse.data)
                             if data is None:
                                 raise MalformedPayload(sse.data)
@@ -229,12 +244,28 @@ class OpenAIProvider:
                                     failure_kind = failure[0] or "stream error"
                                     break
                             for sig in decoder.decode(name, data):
+                                if isinstance(sig, Finished | ParseFault):
+                                    finished = True
                                 for wire_event in assembler.accept(sig):
                                     committed = True
                                     yield wire_event
                 except MalformedPayload as exc:
+                    finished = True
                     for wire_event in assembler.accept(ParseFault(message=str(exc))):
                         yield wire_event
+
+                retry_reason = f"a transient {failure_kind}"
+                if not passing_failure and not finished:
+                    # The connection closed before the response ended. Nothing
+                    # shown yet: try again. Otherwise keep the partial reply
+                    # but mark it failed rather than passing it off as whole.
+                    if not committed and attempt < retry.max_retries:
+                        passing_failure = True
+                        retry_reason = "a stream that ended early"
+                    else:
+                        for wire_event in assembler.accept(ParseFault(message=_TRUNCATED)):
+                            yield wire_event
+                        return
 
                 if not passing_failure:
                     for wire_event in assembler.finalize():
@@ -244,7 +275,7 @@ class OpenAIProvider:
                 delay = compute_delay(attempt, max_delay_seconds=retry.max_delay_seconds)
                 yield build_retry_event(
                     attempt=attempt, max_retries=retry.max_retries,
-                    delay_seconds=delay, reason=f"a transient {failure_kind}",
+                    delay_seconds=delay, reason=retry_reason,
                 )
                 still_alive = await pause_for_retry(delay, signal=signal)
                 if not still_alive:
@@ -273,8 +304,11 @@ class OpenAIProvider:
                     yield self._abort_event(model, endpoint)
                     return
 
-            except (httpx.TimeoutException, httpx.ConnectError, httpx.ReadError) as exc:
-                if attempt >= retry.max_retries:
+            except (httpx.TransportError, ssl.SSLError) as exc:
+                # TLS failures after the handshake surface as a raw SSLError.
+                # Once content has reached the caller a retry would repeat it,
+                # so the reply ends with the error instead.
+                if committed or attempt >= retry.max_retries:
                     yield self._network_error_event(model, endpoint, exc)
                     return
 

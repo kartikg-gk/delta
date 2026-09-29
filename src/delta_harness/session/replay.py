@@ -97,7 +97,10 @@ def _apply_prune(
     surfacing after the messages that outlived it.
     """
     superseded = set(record.replaces_entry_ids)
-    summary = PruneSummaryEntry(summary=record.summary, tokens_before=0)
+    # Stamped with the compaction's own time, not the time of this replay.
+    summary = PruneSummaryEntry(
+        summary=record.summary, tokens_before=0, timestamp=round(record.timestamp * 1000),
+    )
 
     kept: list[tuple[str, TranscriptEntry]] = []
     placed = False
