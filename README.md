@@ -1,7 +1,28 @@
-# Delta
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kartikg-gk/delta/main/assets/delta-logo.png" alt="Delta" width="420">
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/deltaa/"><img src="https://img.shields.io/pypi/v/deltaa?label=pypi&color=7c6cf0" alt="PyPI"></a>
+  <img src="https://img.shields.io/badge/python-3.12%2B-5b8def" alt="Python 3.12+">
+  <a href="https://github.com/kartikg-gk/delta/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-2b2d31" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/models-OpenAI%20%C2%B7%20Anthropic%20%C2%B7%20OpenRouter%20%C2%B7%20Ollama%20%C2%B7%20Hugging%20Face-3a3d4a" alt="Providers">
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#providers-and-configuration">Providers</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#project-structure">Architecture</a>
+</p>
 
 Delta is a minimal coding agent harness in Python built around a small, inspectable model–tool loop. It provides filesystem and shell tools, multi-provider model support, customizable tools, skills, prompts and hooks, and clean interfaces for extending agent behavior without changing the core runtime. Delta can be used interactively from the terminal, scripted for one-shot tasks, or embedded into larger agent and evaluation workflows.
 Requires Python 3.12 or newer.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/kartikg-gk/delta/main/assets/cli.png" alt="Delta's terminal UI fixing a failing test: it reads calc.py, edits it, runs the test, and reports the fix" width="900">
+</p>
 
 ## Install
 
@@ -159,6 +180,40 @@ paths in your home directory), list them with `/skills`, and invoke one directly
 then run `/reload`.
 
 ## Project structure
+
+```mermaid
+flowchart LR
+    subgraph you["You"]
+        tui["Terminal UI"]
+        print["delta -p #quot;...#quot;"]
+        repl["Line REPL"]
+    end
+
+    subgraph app["Session · delta_app"]
+        session["Coding session<br/>slash commands · AGENTS.md<br/>skills · templates · extensions<br/>compaction · provider switching"]
+    end
+
+    subgraph harness["Agent loop · delta_harness"]
+        loop["1. stream the model's reply<br/>2. run its tool calls<br/>3. send results back<br/>4. repeat until done"]
+    end
+
+    subgraph models["Models · delta_model"]
+        anthropic["Anthropic adapter<br/>prompt caching · extended thinking"]
+        compat["OpenAI-compatible adapter<br/>OpenAI · OpenRouter · Ollama<br/>Hugging Face · any compatible URL"]
+    end
+
+    tools["Tools<br/>Read · Write · Edit · Bash"]
+    store[("Sessions<br/>~/.delta/sessions/*.jsonl")]
+
+    tui --> session
+    print --> session
+    repl --> session
+    session --> loop
+    loop --> anthropic
+    loop --> compat
+    loop <--> tools
+    session --> store
+```
 
 Three packages, layered so dependencies only point inward: `delta_harness` imports
 neither of the others, `delta_model` imports the harness, and `delta_app` imports both.
