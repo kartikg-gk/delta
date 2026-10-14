@@ -20,7 +20,15 @@ Write-Host "Installing $spec ..."
 uv tool install --force $spec
 
 if (Get-Command delta -ErrorAction SilentlyContinue) {
-    delta --version
+    try {
+        delta --version
+    } catch {
+        # Some Windows security policies block unsigned launchers like delta.exe.
+        $toolPython = Join-Path (uv tool dir) "deltaa\Scripts\python.exe"
+        Write-Host "Installed, but Windows blocked delta.exe on this machine."
+        Write-Host "Run Delta through Python instead:"
+        Write-Host "  & `"$toolPython`" -m delta_app"
+    }
 } else {
     Write-Host "Installed, but 'delta' is not on your PATH yet."
     Write-Host "Run 'uv tool update-shell', then restart PowerShell."

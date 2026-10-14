@@ -81,6 +81,11 @@ async def _read_sse(response: httpx.Response) -> AsyncIterator[ServerSentEvent]:
             # Empty line — dispatch the accumulated event
             if data_lines:
                 payload = "\n".join(data_lines)
+                if not payload.strip():
+                    # An empty `data:` frame is a keep-alive some proxies send.
+                    event_type = ""
+                    data_lines = []
+                    continue
                 if payload == "[DONE]":
                     # Passed on so the caller knows the stream ended properly.
                     yield ServerSentEvent(event="", data=payload)

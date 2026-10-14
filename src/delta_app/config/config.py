@@ -112,8 +112,8 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
     if resolved is None:
         raise ConfigError(
             "No provider configured.\n"
-            "  Set DELTA_PROVIDER or export an API key env var.\n"
-            "  Run 'delta provider setup' for guidance."
+            "  Run 'delta config' to pick a provider and add your API key,\n"
+            "  or export one, e.g. OPENAI_API_KEY or ANTHROPIC_API_KEY."
         )
 
     resolved = resolved.strip().lower()

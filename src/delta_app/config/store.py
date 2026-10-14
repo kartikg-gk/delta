@@ -70,7 +70,7 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
         base_url="https://router.huggingface.co/v1",
         models=(
             "openai/gpt-oss-120b",
-            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "Qwen/Qwen3-Coder-30B-A3B-Instruct",
             "moonshotai/Kimi-K2-Instruct",
         ),
     ),

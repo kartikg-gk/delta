@@ -493,3 +493,15 @@ async def test_responses_incomplete_is_a_length_stop_not_a_cut() -> None:
         named=True,
     ))
     assert reply.stop_reason == "length" and reply.text == "long"
+
+
+async def test_empty_keepalive_data_frames_are_ignored() -> None:
+    body = (
+        'data: {"choices":[{"index":0,"delta":{"content":"hel"}}]}\n\n'
+        "data:\n\n"
+        "data: \n\n"
+        'data: {"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    last = await _last(_chat_provider(lambda r: httpx.Response(200, text=body)), "gpt-4o")
+    assert isinstance(last, StreamCloseEvent) and last.message.text == "hello"
