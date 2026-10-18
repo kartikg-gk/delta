@@ -117,12 +117,13 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         )
 
     resolved = resolved.strip().lower()
-
     if resolved == "anthropic":
         profile = load_anthropic_profile()
         return _build_anthropic(profile)
 
-    if resolved in _OPENAI_COMPATIBLE:
+    from delta_app.catalog import available_providers
+
+    if resolved in _OPENAI_COMPATIBLE or resolved in {p.key for p in available_providers()}:
         # Named for the chosen provider, so replies, stats, and errors say
         # "openrouter" or "ollama" rather than the shared adapter's "openai".
         profile = replace(load_openai_profile(), name=resolved)

@@ -58,7 +58,7 @@ _PACKAGE = "deltaa"
 _DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 _DEFAULT_OPENAI_MODEL = "gpt-5"
 _DEFAULT_SYSTEM = "You are a helpful coding assistant."
-_SUBCOMMANDS = frozenset({"config", "provider", "session", "tui"})
+_SUBCOMMANDS = frozenset({"config", "provider", "session", "tui", "update", "login"})
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +664,21 @@ async def _run_interactive(session: CodingSession) -> int:
             continue
 
         # Session-level slash commands (/model, /compact, /stats, /export, ...)
+        if text.split(maxsplit=1)[0] == "/login":
+            import shlex
+
+            from delta_app.auth import login_cli
+            from delta_app.config.store import load_config
+
+            if login_cli(shlex.split(text)[1:]) == 0:
+                config = load_config()
+                if config.provider and config.model:
+                    from delta_app.tui.adapter import SessionBridge
+
+                    await SessionBridge(session).apply_model_choice(
+                        config.provider, config.model, None,
+                    )
+            continue
         try:
             response = await session.handle_command(text)
         except Exception as exc:  # noqa: BLE001 - a bad command must not kill the REPL
@@ -797,6 +812,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     # Subcommand dispatch (checked before argparse to avoid positional conflicts)
     if args and args[0] in _SUBCOMMANDS:
         cmd, rest = args[0], args[1:]
+        if cmd == "update":
+            parser = argparse.ArgumentParser(prog="delta update")
+            parser.add_argument("--models", action="store_true", required=True)
+            parser.parse_args(rest)
+            from delta_app.catalog import CatalogError, refresh_catalog
+
+            try:
+                result = asyncio.run(refresh_catalog(force=True))
+            except CatalogError as exc:
+                _warn(f"{exc}. The current catalog is unchanged.")
+                return 1
+            if result.not_modified:
+                _info(f"Model catalog is already current ({result.model_count} models).")
+            elif result.refreshed:
+                _info(f"Model catalog updated: {result.model_count} models.")
+            else:
+                _info(f"Offline: using the saved catalog ({result.model_count} models).")
+            return 0
+        if cmd == "login":
+            from delta_app.auth import login_cli
+
+            return login_cli(rest)
         if cmd == "config":
             from delta_app.cli.config_cmd import handle_config
             return handle_config(rest)

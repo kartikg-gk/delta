@@ -56,6 +56,9 @@ class Skill:
     description: str
     body: str
     source: Path
+    # ``disable-model-invocation: true`` keeps the skill out of the list the
+    # model sees; the user can still run it with ``/skill:<name>``.
+    disable_model_invocation: bool = False
 
     @property
     def command(self) -> str:
@@ -164,6 +167,9 @@ def _load_skill_from_dir(skill_dir: Path) -> Skill:
         description=description,
         body=body,
         source=md_path,
+        disable_model_invocation=(
+            meta.get("disable-model-invocation", "").strip().lower() == "true"
+        ),
     )
 
 
@@ -345,6 +351,7 @@ def build_skill_index(skills: Sequence[Skill]) -> str:
 
     Each skill is rendered as one line: ``/skill:<name> — <description>``
     """
+    skills = [skill for skill in skills if not skill.disable_model_invocation]
     if not skills:
         return ""
     lines = [

@@ -144,6 +144,9 @@ class ReasoningPolicy:
     # Effort-style level (``minimal``/``low``/``medium``/``high``…) for
     # providers that take a named effort instead of a token budget.
     effort: str | None = None
+    # Whether the model can reason at all, when the caller knows (e.g. from a
+    # model catalog). ``None`` leaves the decision to the adapter's own rules.
+    supported: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

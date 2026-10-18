@@ -8,13 +8,17 @@ provider, and executes no tools.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
+from typing import Any
 
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
+from textual.screen import Screen
 from textual.widgets import Footer, Header
 
 from delta_app.tui.adapter import (
@@ -71,6 +75,38 @@ class DeltaApp(App[None]):
 
     CSS_PATH = _CSS_PATH
     TITLE = "δelta"
+    COMMAND_PALETTE_BINDING = "ctrl+k"
+
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
+        """Expose the same live commands, skills, and templates as the composer."""
+        yield from super().get_system_commands(screen)
+        if self._bridge is None:
+            return
+        session = self._bridge.session
+        for name, description in session.COMMANDS:
+            yield SystemCommand(f"/{name}", description, partial(self._palette_command, name))
+        for skill in session.skills:
+            yield SystemCommand(
+                skill.command, skill.description,
+                partial(self._fill_prompt, skill.command + " "),
+            )
+        for template in session._templates:
+            yield SystemCommand(
+                f"/{template.name}", template.description,
+                partial(self._fill_prompt, f"/{template.name} "),
+            )
+
+    def _fill_prompt(self, text: str) -> None:
+        prompt = self.query_one(PromptInput)
+        prompt.text = text
+        prompt.cursor_location = (0, len(text))
+        prompt.focus()
+
+    async def _palette_command(self, name: str) -> None:
+        if name in {"branch", "name", "shell", "create-skill", "agent"}:
+            self._fill_prompt(f"/{name} ")
+        else:
+            await self._run_command(f"/{name}")
 
     BINDINGS = [
         ("escape", "stop", "Stop"),
@@ -232,6 +268,9 @@ class DeltaApp(App[None]):
     async def _run_command(self, text: str) -> None:
         """Delegate a slash command to the runtime."""
         transcript = self.query_one(TranscriptView)
+        if text.split(maxsplit=1)[0] == "/local":
+            self.run_worker(self._session_command(text), group="local", exclusive=True)
+            return
         if text in {"/quit", "/exit", "/q"}:
             self.exit()
             return
@@ -245,11 +284,19 @@ class DeltaApp(App[None]):
                 return
             self.run_worker(self._stream("", resume=True), exclusive=True)
             return
+        if text.split(maxsplit=1)[0] == "/login":
+            provider = text.split(maxsplit=1)[1] if " " in text else ""
+            self.run_worker(self._open_login(provider))
+            return
         if text.strip() in {"/model", "/provider"}:
             # push_screen_wait requires a worker context.
             self.run_worker(self._open_model_picker())
             return
+        await self._session_command(text)
+
+    async def _session_command(self, text: str) -> None:
         assert self._bridge is not None
+        transcript = self.query_one(TranscriptView)
         try:
             response = await self._bridge.handle_command(text)
         except Exception as exc:  # noqa: BLE001 - a bad command must not kill the UI
@@ -267,6 +314,17 @@ class DeltaApp(App[None]):
         session = self._bridge.session
         choice = await self.push_screen_wait(
             ModelScreen(session.provider_name, session.model)
+        )
+        if choice is None:
+            return
+        await self._apply_model_choice(choice)
+
+    async def _open_login(self, provider: str = "") -> None:
+        if self._bridge is None:
+            return
+        session = self._bridge.session
+        choice = await self.push_screen_wait(
+            ModelScreen(session.provider_name, session.model, login=True)
         )
         if choice is None:
             return

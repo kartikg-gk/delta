@@ -34,6 +34,7 @@ from pathlib import Path
 from time import time
 from typing import Any
 
+from delta_app.catalog import model_info
 from delta_app.context.budget import (
     DEFAULT_WINDOW,
     ContextEstimate,
@@ -57,6 +58,7 @@ from delta_harness.contracts.stream import (
 )
 from delta_harness.contracts.tooling import ToolSpec
 from delta_harness.contracts.transcript import (
+    CostBreakdown,
     HumanEntry,
     ModelEntry,
     PruneSummaryEntry,
@@ -118,6 +120,7 @@ _RUNNABLE_COMMANDS: frozenset[str] = frozenset({
     "branch", "branches", "compact", "continue", "create-skill", "diag",
     "export", "help", "model", "name", "plan", "provider", "quit", "reload",
     "rewind", "session", "shell", "skills", "stats", "system", "think", "version",
+    "login", "tools", "prompts",
 })
 
 _RUNNABLE_COMMAND_TABLE: tuple[tuple[str, str], ...] = tuple(
@@ -763,6 +766,8 @@ class CodingSession:
             self._route = RoutePin()
             self._sync_route_to_catalog()
         self._apply_route()
+        # Reasoning support differs between models, so re-check it.
+        self._apply_thinking_level()
         await self._append_record(ModelSwapRecord(model=model))
 
     async def switch_provider(
@@ -820,10 +825,12 @@ class CodingSession:
             setter(ReasoningPolicy(enabled=False))
             return
         level = normalize_thinking_level(self._thinking_level)
+        info = model_info(self._provider_name, self._model)
         setter(ReasoningPolicy(
             enabled=True,
             budget_tokens=thinking_to_budget(level),
             effort=thinking_to_effort(level),
+            supported=info.reasoning if info is not None else None,
         ))
 
     @property
@@ -1088,9 +1095,41 @@ class CodingSession:
             "reload": self._cmd_reload,
             "diag": self._cmd_diag,
             "system": self._cmd_system,
+            "tools": self._cmd_tools,
+            "prompts": self._cmd_prompts,
             "session": self._cmd_session,
             "help": self._cmd_help,
         }
+
+    def _cmd_tools(self, arg: str) -> str:
+        """Inspect the tools and their schemas without invoking them."""
+        import json
+
+        if arg:
+            tool = next((t for t in self._all_tools if t.name.lower() == arg.lower()), None)
+            if tool is None:
+                return f"Unknown tool: {arg}"
+            return f"{tool.name}: {tool.description}\n{json.dumps(tool.parameters, indent=2)}"
+        return "Tools:\n" + "\n".join(
+            f"  {t.name}: {t.description}" for t in self._harness.settings.tools
+        ) + "\nUse /tools <name> to inspect its schema."
+
+    def _cmd_prompts(self, arg: str) -> str:
+        """List, view, or reload prompt templates."""
+        if arg == "reload":
+            if self._templates_loader is not None:
+                self._templates = list(self._templates_loader())
+            return f"Loaded {len(self._templates)} prompt template(s)."
+        if arg:
+            template = next((t for t in self._templates if t.name == arg), None)
+            if template is None:
+                return f"Unknown prompt template: {arg}"
+            return f"/{template.name} ({template.path})\n\n{template.content}"
+        if not self._templates:
+            return "No prompt templates loaded. Add .delta/prompts/*.md, then /prompts reload."
+        return "Prompt templates:\n" + "\n".join(
+            f"  /{t.name}: {t.description}" for t in self._templates
+        ) + "\nUse /<name> [arguments] to run one, /prompts <name> to view it."
 
     def _cmd_help(self, _arg: str) -> str:
         """List every command available here, with usage and aliases.
@@ -1581,11 +1620,33 @@ class CodingSession:
         """Subscriber called by the harness for every streamed event."""
         if not isinstance(event, MessageEndEvent):
             return
+        if isinstance(event.message, ModelEntry):
+            self._price(event.message)
         record_id = await self._persist_entry(event.message)
         if record_id:
             self._record_ids.append(record_id)
         if isinstance(event.message, ModelEntry):
             self._tally(event.message)
+
+    def _price(self, reply: ModelEntry) -> None:
+        """Fill in the cost from the catalog when the provider reported none."""
+        usage = reply.usage
+        if usage.cost.total > 0:
+            return
+        info = model_info(self._provider_name, self._model)
+        if info is None or info.pricing is None:
+            return
+        rates = info.pricing
+        usage.cost = CostBreakdown(
+            input=usage.input * rates.input / 1_000_000,
+            output=usage.output * rates.output / 1_000_000,
+            cache_read=usage.cache_read * rates.cache_read / 1_000_000,
+            cache_write=usage.cache_write * rates.cache_write / 1_000_000,
+            total=rates.cost(
+                fresh=usage.input, output=usage.output,
+                cache_read=usage.cache_read, cache_write=usage.cache_write,
+            ),
+        )
 
     def _tally(self, reply: ModelEntry) -> None:
         """Fold one model reply's usage into the session totals."""
@@ -1789,6 +1850,9 @@ class CodingSession:
 
     def _context_limit(self) -> int:
         """Return the context token limit for the current model."""
+        info = model_info(self._provider_name, self._model)
+        if info is not None and info.context_window:
+            return info.context_window
         return resolve_window(self._model)
 
     # ── internal: utility completions ──────────────────────────────────

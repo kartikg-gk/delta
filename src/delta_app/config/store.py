@@ -79,10 +79,9 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
 
 def provider_info(key: str) -> ProviderInfo:
     """Look up provider metadata by key, raising ``KeyError`` when unknown."""
-    for info in PROVIDERS:
-        if info.key == key:
-            return info
-    raise KeyError(key)
+    from delta_app.catalog import lookup_provider
+
+    return lookup_provider(key)
 
 
 PROVIDER_KEYS: tuple[str, ...] = tuple(p.key for p in PROVIDERS)

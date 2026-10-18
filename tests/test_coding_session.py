@@ -1101,7 +1101,11 @@ async def test_resume_preserves_model_switch(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_context_estimation() -> None:
-    provider = _make_provider([_make_reply(input_tokens=5000)])
+    reply = _make_reply(input_tokens=5000)
+    # A real reply is created after the prompt it answers; a pre-built one
+    # must not look older, or its usage is (rightly) not trusted.
+    reply.timestamp += 60_000
+    provider = _make_provider([reply])
     session = await CodingSession.create(
         provider=provider,
         provider_name="test",
