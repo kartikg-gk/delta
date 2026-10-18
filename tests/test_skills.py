@@ -522,3 +522,34 @@ def test_parse_invocation_embedded_in_larger_text() -> None:
     assert inv is not None
     assert inv.name == "embedded"
     assert inv.body == "Inner body."
+
+
+# ── model invocation can be switched off per skill ─────────────────────────
+
+
+def test_disable_model_invocation_hides_skill_from_the_model_only(tmp_path):
+    from delta_app.skillset import build_skill_index, expand_command, load_skills
+
+    for name, extra in (("public", ""), ("manual", "disable-model-invocation: true\n")):
+        folder = tmp_path / name
+        folder.mkdir()
+        (folder / "SKILL.md").write_text(
+            f"---\ndescription: {name} skill\n{extra}---\nDo the {name} thing.\n",
+            encoding="utf-8",
+        )
+    skills = load_skills([tmp_path])
+    index = build_skill_index(skills)
+    assert "/skill:public" in index and "/skill:manual" not in index
+    assert expand_command("/skill:manual go", {s.name: s for s in skills}) is not None
+
+
+def test_description_with_a_colon_still_loads(tmp_path):
+    from delta_app.skillset import load_skills
+
+    folder = tmp_path / "triage"
+    folder.mkdir()
+    (folder / "SKILL.md").write_text(
+        "---\ndescription: Use this when: the tests fail\n---\nBody\n", encoding="utf-8",
+    )
+    (skill,) = load_skills([tmp_path])
+    assert skill.description == "Use this when: the tests fail"

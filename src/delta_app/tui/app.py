@@ -86,11 +86,10 @@ class DeltaApp(App[None]):
         for name, description in session.COMMANDS:
             yield SystemCommand(f"/{name}", description, partial(self._palette_command, name))
         for skill in session.skills:
-            if skill.user_invocable:
-                yield SystemCommand(
-                    skill.command, skill.description,
-                    partial(self._fill_prompt, skill.command + " "),
-                )
+            yield SystemCommand(
+                skill.command, skill.description,
+                partial(self._fill_prompt, skill.command + " "),
+            )
         for template in session._templates:
             yield SystemCommand(
                 f"/{template.name}", template.description,
