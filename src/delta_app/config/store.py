@@ -31,14 +31,6 @@ class ProviderInfo:
 
 PROVIDERS: tuple[ProviderInfo, ...] = (
     ProviderInfo(
-        key="codex", label="ChatGPT / Codex subscription", key_env="CODEX_ACCESS_TOKEN",
-        base_url="", models=("gpt-5-codex",), needs_key=False,
-    ),
-    ProviderInfo(
-        key="claude-code", label="Claude subscription", key_env="CLAUDE_CODE_OAUTH_TOKEN",
-        base_url="", models=("sonnet", "opus", "haiku"), needs_key=False,
-    ),
-    ProviderInfo(
         key="openai",
         label="OpenAI",
         key_env="OPENAI_API_KEY",

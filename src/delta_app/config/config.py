@@ -31,9 +31,7 @@ from delta_model.settings import (
 # Known provider identifiers
 # ---------------------------------------------------------------------------
 
-_KNOWN_PROVIDERS = (
-    "anthropic", "openai", "openrouter", "ollama", "huggingface", "scripted", "codex", "claude-code",
-)
+_KNOWN_PROVIDERS = ("anthropic", "openai", "openrouter", "ollama", "huggingface", "scripted")
 
 # OpenAI-compatible backends reuse the OpenAI adapter with a different base URL.
 _OPENAI_COMPATIBLE = ("openai", "openrouter", "ollama", "huggingface")
@@ -119,11 +117,6 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         )
 
     resolved = resolved.strip().lower()
-    if resolved in {"codex", "claude-code"}:
-        from delta_model.subscription import SubscriptionProvider
-
-        return SubscriptionProvider(resolved)
-
     if resolved == "anthropic":
         profile = load_anthropic_profile()
         return _build_anthropic(profile)

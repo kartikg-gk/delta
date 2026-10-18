@@ -309,7 +309,7 @@ async def test_repl_does_not_send_unrun_registered_command_to_model(
         tools=build_tool_registry(),
         sessions_dir=tmp_path / "sessions",
     )
-    lines = iter(["/tools", "/quit"])
+    lines = iter(["/theme", "/quit"])
     monkeypatch.setattr(cli, "_prompt_user", lambda: next(lines, None))
     try:
         assert await cli._run_interactive(session) == 0
@@ -318,5 +318,5 @@ async def test_repl_does_not_send_unrun_registered_command_to_model(
 
     captured = capsys.readouterr()
     output = captured.out + captured.err
-    assert "/tools is not available in the line REPL" in output
+    assert "/theme is not available in the line REPL" in output
     assert "Provider produced no assistant message" not in output

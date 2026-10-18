@@ -794,9 +794,6 @@ async def _async_main(ns: argparse.Namespace) -> int:
         return await _run_interactive(session)
     finally:
         await session.shutdown()
-        from delta_app.local import close_local_backend
-
-        await close_local_backend()
 
 
 # ---------------------------------------------------------------------------

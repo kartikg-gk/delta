@@ -258,9 +258,6 @@ class SessionBridge:
         # behind (notably the base URL shared by OpenAI-compatible backends).
         import os
 
-        if provider in {"codex", "claude-code"}:
-            await self._session.switch_provider(resolve_provider(provider), provider, model)
-            return f"Switched to {info.label} · {model}"
         if provider == "anthropic":
             key_var, url_var = "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL"
         else:

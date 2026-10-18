@@ -504,9 +504,6 @@ class CodingSession:
             self._record_ids[-1] if self._record_ids else None
         )
         self._extensions: list[object] = []
-        from delta_app.subagents import SubagentManager
-
-        self.subagents = SubagentManager(self)
         self._named = title is not None
         self._named_at = 0
         self._renamed_manually = False
@@ -733,7 +730,6 @@ class CodingSession:
 
     async def shutdown(self) -> None:
         """Flush pending state and release resources."""
-        await self.subagents.shutdown()
         self._unsubscribe()
         if self._tip_id and self._pending_header is None:
             await self._append_record(
@@ -1096,20 +1092,9 @@ class CodingSession:
             "system": self._cmd_system,
             "tools": self._cmd_tools,
             "prompts": self._cmd_prompts,
-            "local": self._cmd_local,
-            "agent": self.subagents.command,
-            "agents": self._cmd_agents,
             "session": self._cmd_session,
             "help": self._cmd_help,
         }
-
-    async def _cmd_local(self, arg: str) -> str:
-        from delta_app.local import local_command
-
-        return await local_command(self, arg)
-
-    async def _cmd_agents(self, _arg: str) -> str:
-        return await self.subagents.command("list")
 
     def _cmd_tools(self, arg: str) -> str:
         """Inspect the tools and their schemas without invoking them."""

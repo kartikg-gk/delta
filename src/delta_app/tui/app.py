@@ -8,15 +8,17 @@ provider, and executes no tools.
 from __future__ import annotations
 
 import argparse
-from functools import partial
+from collections.abc import Iterable
 from contextlib import suppress
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from textual.app import App, ComposeResult, SystemCommand
-from textual.screen import Screen
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
+from textual.screen import Screen
 from textual.widgets import Footer, Header
 
 from delta_app.tui.adapter import (
@@ -75,7 +77,7 @@ class DeltaApp(App[None]):
     TITLE = "δelta"
     COMMAND_PALETTE_BINDING = "ctrl+k"
 
-    def get_system_commands(self, screen: Screen):
+    def get_system_commands(self, screen: Screen[Any]) -> Iterable[SystemCommand]:
         """Expose the same live commands, skills, and templates as the composer."""
         yield from super().get_system_commands(screen)
         if self._bridge is None:
@@ -141,7 +143,6 @@ class DeltaApp(App[None]):
     async def on_mount(self) -> None:
         await self._refresh_sidebar()
         self._refresh_status()
-        self.set_interval(0.3, self._refresh_subagents)
         if self._bridge is not None:
             self.query_one(TranscriptView).replay(self._bridge.session.transcript)
 
@@ -322,33 +323,12 @@ class DeltaApp(App[None]):
     async def _open_login(self, provider: str = "") -> None:
         if self._bridge is None:
             return
-        from delta_app.auth import subscription_login
-        from delta_app.config.store import provider_info
-
-        transcript = self.query_one(TranscriptView)
-        if provider:
-            try:
-                info = provider_info(provider)
-            except KeyError:
-                transcript.add_notice(f"Unknown provider: {provider}", error=True)
-                return
-            if provider in {"codex", "claude-code"}:
-                try:
-                    await subscription_login(provider, transcript.add_notice)
-                    await self._apply_model_choice(ModelChoice(provider, info.label, info.models[0], None))
-                except Exception as exc:
-                    transcript.add_notice(f"Login failed: {exc}", error=True)
-                return
         session = self._bridge.session
-        choice = await self.push_screen_wait(ModelScreen(session.provider_name, session.model, login=True))
+        choice = await self.push_screen_wait(
+            ModelScreen(session.provider_name, session.model, login=True)
+        )
         if choice is None:
             return
-        if choice.provider in {"codex", "claude-code"}:
-            try:
-                await subscription_login(choice.provider, transcript.add_notice)
-            except Exception as exc:
-                transcript.add_notice(f"Login failed: {exc}", error=True)
-                return
         await self._apply_model_choice(choice)
 
     async def _apply_model_choice(self, choice: ModelChoice) -> None:
@@ -423,10 +403,6 @@ class DeltaApp(App[None]):
             return
         await self.query_one(Sidebar).show(self._bridge.sessions())
 
-    def _refresh_subagents(self) -> None:
-        if self._bridge is not None:
-            self.query_one(Sidebar).show_subagents(self._bridge.session.subagents.runs.values())
-
 
 async def run_app(ns: argparse.Namespace) -> int:
     """Build the shared runtime session and run the TUI over it."""
@@ -443,9 +419,6 @@ async def run_app(ns: argparse.Namespace) -> int:
         # The bridge's session changes when the user switches; shut down
         # whichever one is current.
         await bridge.shutdown()
-        from delta_app.local import close_local_backend
-
-        await close_local_backend()
     return 0
 
 

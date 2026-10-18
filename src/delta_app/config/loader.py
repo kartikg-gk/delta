@@ -65,8 +65,6 @@ def apply_config(provider: str, config: DeltaConfig | None = None) -> None:
     precedence.  OpenAI-compatible backends (OpenRouter, Ollama) are mapped
     onto the ``OPENAI_*`` variables the existing loader already reads.
     """
-    if provider in {"codex", "claude-code"}:
-        return
     try:
         info = provider_info(provider)
     except KeyError:
