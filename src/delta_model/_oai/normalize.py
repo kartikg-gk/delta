@@ -44,6 +44,7 @@ from delta_model._oai.parsers import (
     ParsedSignal,
     ParseFault,
     ReasoningChunk,
+    ReasoningSealed,
     TextChunk,
 )
 
@@ -131,6 +132,8 @@ class EventAssembler:
             return self._on_text(signal)
         if isinstance(signal, ReasoningChunk):
             return self._on_reasoning(signal)
+        if isinstance(signal, ReasoningSealed):
+            return self._on_reasoning_sealed(signal)
         if isinstance(signal, CallBegin):
             return self._on_call_begin(signal)
         if isinstance(signal, CallArgFragment):
@@ -157,6 +160,22 @@ class EventAssembler:
 
     def _on_reasoning(self, signal: ReasoningChunk) -> list[WireEvent]:
         return self._on_channel("reasoning", signal.text)
+
+    def _on_reasoning_sealed(self, signal: ReasoningSealed) -> list[WireEvent]:
+        """Attach a finished reasoning item to its thinking block."""
+        events: list[WireEvent] = []
+        if "reasoning" in self._open:
+            events.extend(self._close_active())
+        for position in range(len(self._blocks) - 1, -1, -1):
+            block = self._blocks[position]
+            if isinstance(block, ThoughtSegment) and block.thinking_signature is None:
+                self._blocks[position] = block.model_copy(
+                    update={"thinking_signature": signal.item_json},
+                )
+                return events
+        # Reasoning with no visible summary still has to be handed back.
+        self._blocks.append(ThoughtSegment(thinking="", thinking_signature=signal.item_json))
+        return events
 
     def _on_channel(self, kind: str, fragment: str) -> list[WireEvent]:
         events = self._ensure_open()

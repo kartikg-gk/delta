@@ -74,6 +74,15 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
             "moonshotai/Kimi-K2-Instruct",
         ),
     ),
+    # Signs in with a ChatGPT plan instead of an API key (``delta login chatgpt``).
+    ProviderInfo(
+        key="chatgpt",
+        label="ChatGPT plan (Codex)",
+        key_env="",
+        base_url="https://chatgpt.com/backend-api",
+        models=("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"),
+        needs_key=False,
+    ),
 )
 
 

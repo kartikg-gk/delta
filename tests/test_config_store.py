@@ -88,7 +88,9 @@ class TestStore:
         assert mask_key(raw) == expected
 
     def test_known_providers(self):
-        assert PROVIDER_KEYS == ("openai", "anthropic", "openrouter", "ollama", "huggingface")
+        assert PROVIDER_KEYS == (
+            "openai", "anthropic", "openrouter", "ollama", "huggingface", "chatgpt",
+        )
 
     def test_provider_info_unknown(self):
         with pytest.raises(KeyError):

@@ -15,6 +15,7 @@ when the complete argument string is available.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -37,6 +38,14 @@ class ReasoningChunk:
     """An incremental fragment of reasoning / chain-of-thought output."""
 
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReasoningSealed:
+    """A finished Responses reasoning item, kept whole (as JSON) so a stateless
+    backend can be handed it back on the next request."""
+
+    item_json: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +101,7 @@ class ParseFault:
 type ParsedSignal = (
     TextChunk
     | ReasoningChunk
+    | ReasoningSealed
     | CallBegin
     | CallArgFragment
     | CallResolved
@@ -321,6 +331,8 @@ class ResponsesDecoder:
             case "response.output_item.done":
                 # Some servers finish a call here without an arguments `done`.
                 item = data.get("item", {})
+                if item.get("type") == "reasoning":
+                    signals.append(ReasoningSealed(item_json=json.dumps(item)))
                 if item.get("type") == "function_call":
                     signals += self._resolve(data.get("output_index", 0), item.get("arguments"))
 
