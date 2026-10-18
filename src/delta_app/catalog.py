@@ -420,7 +420,7 @@ def lookup_provider(key: str) -> ProviderInfo:
 
 # Providers that serve another provider's models under a plan: limits and
 # reasoning come from the original listing, prices do not apply.
-_PLAN_FACTS_FROM = {"chatgpt": "openai"}
+_PLAN_FACTS_FROM = {"chatgpt": "openai", "claude": "anthropic"}
 
 
 def model_info(provider: str, model: str) -> ModelInfo | None:

@@ -32,6 +32,7 @@ from delta_model.settings import (
 # ---------------------------------------------------------------------------
 
 _KNOWN_PROVIDERS = (
+    "claude",
     "anthropic", "openai", "openrouter", "ollama", "huggingface", "chatgpt", "scripted",
 )
 
@@ -139,6 +140,10 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         )
 
     resolved = resolved.strip().lower()
+    if resolved == "claude":
+        from delta_app.claude_login import build_provider
+
+        return build_provider()
     if resolved == "chatgpt":
         return _build_chatgpt()
 
@@ -172,6 +177,10 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
 
 def _probe_status(provider_name: str) -> str:
     """Return a short status string for a provider: 'ready', 'no key', etc."""
+    if provider_name == "claude":
+        from delta_app.claude_accounts import load_login
+
+        return "ready" if load_login() else "signed out (delta login claude)"
     if provider_name == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return "no key  (set ANTHROPIC_API_KEY)"

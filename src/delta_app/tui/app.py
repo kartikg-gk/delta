@@ -332,9 +332,9 @@ class DeltaApp(App[None]):
         from delta_app.config.store import provider_info
 
         transcript = self.query_one(TranscriptView)
-        if provider == CHATGPT:
-            info = provider_info(CHATGPT)
-            choice: ModelChoice | None = ModelChoice(CHATGPT, info.label, info.models[0], None)
+        if provider in (CHATGPT, "claude"):
+            info = provider_info(provider)
+            choice: ModelChoice | None = ModelChoice(provider, info.label, info.models[0], None)
         else:
             session = self._bridge.session
             choice = await self.push_screen_wait(
@@ -353,6 +353,31 @@ class DeltaApp(App[None]):
                 transcript.add_notice(f"Sign-in failed: {exc}", error=True)
                 return
             transcript.add_notice("Signed in to your ChatGPT plan.")
+        if choice.provider == "claude":
+            from delta_app.claude_accounts import SignInError as ClaudeSignInError
+            from delta_app.claude_accounts import sign_in as claude_sign_in
+            from delta_app.tui.claude_login_screen import ClaudeLoginScreen
+
+            transcript.add_notice("Opening your browser to sign in to Claude…")
+            login_screen: ClaudeLoginScreen | None = None
+
+            def show_claude_url(url: str) -> None:
+                nonlocal login_screen
+                login_screen = ClaudeLoginScreen(url)
+
+            async def ask_claude_code() -> str:
+                assert login_screen is not None
+                return await self.push_screen_wait(login_screen)
+
+            try:
+                await claude_sign_in(show_url=show_claude_url, ask_code=ask_claude_code)
+            except ClaudeSignInError as exc:
+                transcript.add_notice(f"Sign-in failed: {exc}", error=True)
+                return
+            finally:
+                if login_screen is not None and login_screen in self.screen_stack:
+                    self.pop_screen()
+            transcript.add_notice("Signed in to your Claude plan.")
         await self._apply_model_choice(choice)
 
     async def _apply_model_choice(self, choice: ModelChoice) -> None:

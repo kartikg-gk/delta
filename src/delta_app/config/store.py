@@ -83,6 +83,14 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
         models=("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"),
         needs_key=False,
     ),
+    ProviderInfo(
+        key="claude",
+        label="Claude Pro/Max",
+        key_env="",
+        base_url="https://api.anthropic.com",
+        models=("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"),
+        needs_key=False,
+    ),
 )
 
 

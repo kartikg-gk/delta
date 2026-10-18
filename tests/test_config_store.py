@@ -90,6 +90,7 @@ class TestStore:
     def test_known_providers(self):
         assert PROVIDER_KEYS == (
             "openai", "anthropic", "openrouter", "ollama", "huggingface", "chatgpt",
+            "claude",
         )
 
     def test_provider_info_unknown(self):

@@ -62,6 +62,21 @@ def login_cli(args: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="delta login")
     parser.add_argument("provider", nargs="?")
     ns = parser.parse_args(args)
+    if ns.provider == "claude":
+        from delta_app.claude_accounts import SignInError as ClaudeSignInError
+        from delta_app.claude_login import sign_in_on_console as claude_sign_in
+
+        try:
+            asyncio.run(claude_sign_in())
+        except ClaudeSignInError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt:
+            print("\nSign-in cancelled.", file=sys.stderr)
+            return 130
+        _remember_choice("claude")
+        print("Signed in. Delta will use your Claude plan.", file=sys.stderr)
+        return 0
     if ns.provider == CHATGPT:
         try:
             asyncio.run(sign_in_on_console())
@@ -83,6 +98,11 @@ def logout_cli(args: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="delta logout")
     parser.add_argument("provider", nargs="?", default=CHATGPT)
     ns = parser.parse_args(args)
+    if ns.provider == "claude":
+        from delta_app.claude_accounts import sign_out as claude_sign_out
+
+        print("Signed out." if claude_sign_out() else "Not signed in.", file=sys.stderr)
+        return 0
     if ns.provider != CHATGPT:
         print(
             f"{ns.provider} uses an API key; remove it with 'delta config' or unset its "
