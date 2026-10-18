@@ -816,14 +816,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser = argparse.ArgumentParser(prog="delta update")
             parser.add_argument("--models", action="store_true", required=True)
             parser.parse_args(rest)
-            from delta_app.catalog import refresh_models
+            from delta_app.catalog import CatalogError, refresh_catalog
 
             try:
-                count = asyncio.run(refresh_models())
-            except Exception as exc:
-                _warn(f"Model refresh failed: {exc}")
+                result = asyncio.run(refresh_catalog(force=True))
+            except CatalogError as exc:
+                _warn(f"{exc}. The current catalog is unchanged.")
                 return 1
-            _info(f"Updated {count} models from models.dev. Custom catalog overrides preserved.")
+            if result.not_modified:
+                _info(f"Model catalog is already current ({result.model_count} models).")
+            elif result.refreshed:
+                _info(f"Model catalog updated: {result.model_count} models.")
+            else:
+                _info(f"Offline: using the saved catalog ({result.model_count} models).")
             return 0
         if cmd == "login":
             from delta_app.auth import login_cli

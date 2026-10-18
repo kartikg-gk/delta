@@ -173,7 +173,8 @@ def build_reasoning_extra(
     ``reasoning: {effort}``. Nothing is sent when reasoning is off or the model
     does not reason.
     """
-    if not policy.enabled or not reasons(model):
+    supported = policy.supported if policy.supported is not None else reasons(model)
+    if not policy.enabled or not supported:
         return {}
     effort = policy.effort or ("high" if policy.budget_tokens else "medium")
     if effort not in _EFFORTS:

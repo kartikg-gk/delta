@@ -1,8 +1,11 @@
 """Modal picker for switching provider and model.
 
 A three-step dialog — provider, then model, then an API key if one is not
-already stored. It gathers a selection and dismisses with the result; the
-app performs the actual switch through the runtime.
+already stored. The model step lists the catalog's models (suggested ones
+first) with a filter box; Enter on a name that is not listed uses it as
+typed. A catalog refresh runs in the background while the dialog is open.
+It gathers a selection and dismisses with the result; the app performs the
+actual switch through the runtime.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, ListItem, ListView
 
-from delta_app.catalog import available_providers
+from delta_app.catalog import CatalogError, available_providers, models_for, refresh_catalog
 from delta_app.config.store import ProviderInfo, load_config
 
 
@@ -57,13 +60,25 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
     def compose(self) -> ComposeResult:
         with Vertical(id="model-dialog"):
             yield Label("Select provider", id="model-title")
+            yield Input(placeholder="Filter models, or type a model id", id="model-filter")
             yield ListView(id="model-list")
             yield Input(placeholder="API key", password=True, id="model-key")
             yield Label("", id="model-hint")
 
     def on_mount(self) -> None:
         self.query_one("#model-key", Input).display = False
+        self.query_one("#model-filter", Input).display = False
         self._show_providers()
+        # Never blocks the dialog; a failed or skipped refresh changes nothing.
+        self.run_worker(self._refresh_catalog(), exclusive=True)
+
+    async def _refresh_catalog(self) -> None:
+        try:
+            result = await refresh_catalog()
+        except CatalogError:
+            return
+        if result.refreshed and self._info is not None and self.is_attached:
+            self._fill_models(self.query_one("#model-filter", Input).value)
 
     # -- steps --------------------------------------------------------------
 
@@ -79,21 +94,35 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
         listing.focus()
 
     def _show_models(self, info: ProviderInfo) -> None:
-        """Step 2 — list that provider's models."""
+        """Step 2 — list that provider's models, with a filter box."""
         self._info = info
         self.query_one("#model-title", Label).update(f"{info.label} — select model")
+        self.query_one("#model-hint", Label).update(
+            "Type to filter · Enter picks · a name not listed is used as typed"
+        )
+        field = self.query_one("#model-filter", Input)
+        field.display = True
+        field.value = ""
+        self._fill_models("")
+        field.focus()
+
+    def _fill_models(self, needle: str) -> None:
+        assert self._info is not None
+        wanted = needle.strip().lower()
         listing = self.query_one("#model-list", ListView)
         listing.clear()
-        for name in info.models:
+        for name in models_for(self._info.key):
+            if wanted and wanted not in name.lower():
+                continue
             marker = "●" if name == self._current_model else " "
             listing.append(_Row(f"{marker} {name}", name))
         listing.index = 0
-        listing.focus()
 
     def _show_key_prompt(self) -> None:
         """Step 3 — ask for an API key, only when none is stored."""
         assert self._info is not None
         self.query_one("#model-list", ListView).display = False
+        self.query_one("#model-filter", Input).display = False
         field = self.query_one("#model-key", Input)
         field.display = True
         field.focus()
@@ -132,13 +161,30 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
             return
         self._show_key_prompt()
 
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "model-filter" and self._info is not None:
+            event.stop()
+            self._fill_models(event.value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
+        if event.input.id == "model-filter":
+            self._on_filter_submitted(event.value)
+            return
         key = event.value.strip()
         if not key:
             self.query_one("#model-hint", Label).update("API key must not be empty.")
             return
         self._finish(key)
+
+    def _on_filter_submitted(self, text: str) -> None:
+        """Enter in the filter: the highlighted match, else the typed id."""
+        listing = self.query_one("#model-list", ListView)
+        row = listing.highlighted_child
+        if isinstance(row, _Row):
+            self._on_model_chosen(row.value)
+        elif text.strip():
+            self._on_model_chosen(text.strip())
 
     def _finish(self, api_key: str | None) -> None:
         assert self._info is not None

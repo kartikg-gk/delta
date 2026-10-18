@@ -177,7 +177,7 @@ def _thinking_section(
     policy: ReasoningPolicy, max_tokens: int,
 ) -> dict[str, Any] | None:
     """Build the ``thinking`` parameter for the Messages API."""
-    if not policy.enabled:
+    if not policy.enabled or policy.supported is False:
         return None
     budget = policy.budget_tokens
     if budget is None:
