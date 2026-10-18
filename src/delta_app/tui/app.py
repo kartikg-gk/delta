@@ -8,10 +8,12 @@ provider, and executes no tools.
 from __future__ import annotations
 
 import argparse
+from functools import partial
 from contextlib import suppress
 from pathlib import Path
 
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, SystemCommand
+from textual.screen import Screen
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.query import NoMatches
@@ -71,6 +73,39 @@ class DeltaApp(App[None]):
 
     CSS_PATH = _CSS_PATH
     TITLE = "δelta"
+    COMMAND_PALETTE_BINDING = "ctrl+k"
+
+    def get_system_commands(self, screen: Screen):
+        """Expose the same live commands, skills, and templates as the composer."""
+        yield from super().get_system_commands(screen)
+        if self._bridge is None:
+            return
+        session = self._bridge.session
+        for name, description in session.COMMANDS:
+            yield SystemCommand(f"/{name}", description, partial(self._palette_command, name))
+        for skill in session.skills:
+            if skill.user_invocable:
+                yield SystemCommand(
+                    skill.command, skill.description,
+                    partial(self._fill_prompt, skill.command + " "),
+                )
+        for template in session._templates:
+            yield SystemCommand(
+                f"/{template.name}", template.description,
+                partial(self._fill_prompt, f"/{template.name} "),
+            )
+
+    def _fill_prompt(self, text: str) -> None:
+        prompt = self.query_one(PromptInput)
+        prompt.text = text
+        prompt.cursor_location = (0, len(text))
+        prompt.focus()
+
+    async def _palette_command(self, name: str) -> None:
+        if name in {"branch", "name", "shell", "create-skill", "agent"}:
+            self._fill_prompt(f"/{name} ")
+        else:
+            await self._run_command(f"/{name}")
 
     BINDINGS = [
         ("escape", "stop", "Stop"),
@@ -106,6 +141,7 @@ class DeltaApp(App[None]):
     async def on_mount(self) -> None:
         await self._refresh_sidebar()
         self._refresh_status()
+        self.set_interval(0.3, self._refresh_subagents)
         if self._bridge is not None:
             self.query_one(TranscriptView).replay(self._bridge.session.transcript)
 
@@ -232,6 +268,9 @@ class DeltaApp(App[None]):
     async def _run_command(self, text: str) -> None:
         """Delegate a slash command to the runtime."""
         transcript = self.query_one(TranscriptView)
+        if text.split(maxsplit=1)[0] == "/local":
+            self.run_worker(self._session_command(text), group="local", exclusive=True)
+            return
         if text in {"/quit", "/exit", "/q"}:
             self.exit()
             return
@@ -245,11 +284,19 @@ class DeltaApp(App[None]):
                 return
             self.run_worker(self._stream("", resume=True), exclusive=True)
             return
+        if text.split(maxsplit=1)[0] == "/login":
+            provider = text.split(maxsplit=1)[1] if " " in text else ""
+            self.run_worker(self._open_login(provider))
+            return
         if text.strip() in {"/model", "/provider"}:
             # push_screen_wait requires a worker context.
             self.run_worker(self._open_model_picker())
             return
+        await self._session_command(text)
+
+    async def _session_command(self, text: str) -> None:
         assert self._bridge is not None
+        transcript = self.query_one(TranscriptView)
         try:
             response = await self._bridge.handle_command(text)
         except Exception as exc:  # noqa: BLE001 - a bad command must not kill the UI
@@ -270,6 +317,38 @@ class DeltaApp(App[None]):
         )
         if choice is None:
             return
+        await self._apply_model_choice(choice)
+
+    async def _open_login(self, provider: str = "") -> None:
+        if self._bridge is None:
+            return
+        from delta_app.auth import subscription_login
+        from delta_app.config.store import provider_info
+
+        transcript = self.query_one(TranscriptView)
+        if provider:
+            try:
+                info = provider_info(provider)
+            except KeyError:
+                transcript.add_notice(f"Unknown provider: {provider}", error=True)
+                return
+            if provider in {"codex", "claude-code"}:
+                try:
+                    await subscription_login(provider, transcript.add_notice)
+                    await self._apply_model_choice(ModelChoice(provider, info.label, info.models[0], None))
+                except Exception as exc:
+                    transcript.add_notice(f"Login failed: {exc}", error=True)
+                return
+        session = self._bridge.session
+        choice = await self.push_screen_wait(ModelScreen(session.provider_name, session.model, login=True))
+        if choice is None:
+            return
+        if choice.provider in {"codex", "claude-code"}:
+            try:
+                await subscription_login(choice.provider, transcript.add_notice)
+            except Exception as exc:
+                transcript.add_notice(f"Login failed: {exc}", error=True)
+                return
         await self._apply_model_choice(choice)
 
     async def _apply_model_choice(self, choice: ModelChoice) -> None:
@@ -344,6 +423,10 @@ class DeltaApp(App[None]):
             return
         await self.query_one(Sidebar).show(self._bridge.sessions())
 
+    def _refresh_subagents(self) -> None:
+        if self._bridge is not None:
+            self.query_one(Sidebar).show_subagents(self._bridge.session.subagents.runs.values())
+
 
 async def run_app(ns: argparse.Namespace) -> int:
     """Build the shared runtime session and run the TUI over it."""
@@ -360,6 +443,9 @@ async def run_app(ns: argparse.Namespace) -> int:
         # The bridge's session changes when the user switches; shut down
         # whichever one is current.
         await bridge.shutdown()
+        from delta_app.local import close_local_backend
+
+        await close_local_backend()
     return 0
 
 

@@ -21,6 +21,7 @@ dependencies = [
     "pydantic>=2.7",
     "httpx[socks]>=0.27",
     "textual>=8.2.8",
+    "pyyaml>=6.0",
 ]
 
 [project.urls]
@@ -34,6 +35,7 @@ delta = "delta_app.cli.main:main"
 [dependency-groups]
 # Development tools; installed by `uv sync`, never part of the published package.
 dev = [
+    "types-PyYAML>=6.0",
     "pytest>=8",
     "pytest-asyncio>=0.23",
     "ruff>=0.5",

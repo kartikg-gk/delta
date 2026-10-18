@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 # ── constants ──────────────────────────────────────────────────────────────
 
@@ -56,6 +59,12 @@ class Skill:
     description: str
     body: str
     source: Path
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, str] = field(default_factory=dict)
+    allowed_tools: tuple[str, ...] = ()
+    disable_model_invocation: bool = False
+    user_invocable: bool = True
 
     @property
     def command(self) -> str:
@@ -93,7 +102,7 @@ _FRONT_MATTER_RE = re.compile(
 )
 
 
-def _parse_front_matter(text: str) -> tuple[dict[str, str], str]:
+def _parse_front_matter(text: str) -> tuple[dict[str, Any], str]:
     """Split optional YAML front matter from the markdown body.
 
     Returns ``(metadata_dict, body_without_front_matter)``.  Only simple
@@ -103,24 +112,13 @@ def _parse_front_matter(text: str) -> tuple[dict[str, str], str]:
     if match is None:
         return {}, text
 
-    raw_yaml = match.group(1)
-    body = text[match.end():]
-    meta: dict[str, str] = {}
-    for line in raw_yaml.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        colon = line.find(":")
-        if colon < 1:
-            continue
-        key = line[:colon].strip()
-        value = line[colon + 1:].strip()
-        # Strip surrounding quotes
-        if len(value) >= 2 and value[0] in ('"', "'") and value[-1] == value[0]:
-            value = value[1:-1]
-        meta[key] = value
-
-    return meta, body
+    try:
+        meta = yaml.safe_load(match.group(1)) or {}
+    except yaml.YAMLError as exc:
+        raise SkillLoadError(f"Invalid skill YAML: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise SkillLoadError("Skill front matter must be a mapping")
+    return meta, text[match.end():]
 
 
 def _derive_description(body: str) -> str:
@@ -156,6 +154,22 @@ def _load_skill_from_dir(skill_dir: Path) -> Skill:
         ) from exc
 
     meta, body = _parse_front_matter(raw)
+    for key in ("name", "description", "license", "compatibility"):
+        if key in meta and not isinstance(meta[key], str):
+            raise SkillLoadError(f"{key} must be a string")
+    metadata = meta.get("metadata", {})
+    if not isinstance(metadata, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) for k, v in metadata.items()
+    ):
+        raise SkillLoadError("metadata must map strings to strings")
+    for key in ("disable-model-invocation", "user-invocable"):
+        if key in meta and not isinstance(meta[key], bool):
+            raise SkillLoadError(f"{key} must be a boolean")
+    allowed = meta.get("allowed-tools", "")
+    if isinstance(allowed, str):
+        allowed = allowed.split()
+    if not isinstance(allowed, list) or any(not isinstance(x, str) for x in allowed):
+        raise SkillLoadError("allowed-tools must be a string or list of strings")
     name = meta.get("name", skill_dir.name)
     description = meta.get("description", "") or _derive_description(body)
 
@@ -164,6 +178,12 @@ def _load_skill_from_dir(skill_dir: Path) -> Skill:
         description=description,
         body=body,
         source=md_path,
+        license=meta.get("license"),
+        compatibility=meta.get("compatibility"),
+        metadata=metadata,
+        allowed_tools=tuple(allowed),
+        disable_model_invocation=meta.get("disable-model-invocation", False),
+        user_invocable=meta.get("user-invocable", True),
     )
 
 
@@ -293,6 +313,8 @@ def expand_command(
         raise KeyError(f"Unknown skill: {name!r}")
 
     skill = skills[name]
+    if not skill.user_invocable:
+        raise ValueError(f"Skill {name!r} is not user-invocable")
     return format_invocation(SkillInvocation(
         name=name,
         arguments=arguments,
@@ -345,10 +367,11 @@ def build_skill_index(skills: Sequence[Skill]) -> str:
 
     Each skill is rendered as one line: ``/skill:<name> — <description>``
     """
+    skills = [skill for skill in skills if not skill.disable_model_invocation]
     if not skills:
         return ""
     lines = [
-        f"  {skill.command} — {skill.description}"
+        f"  {skill.command} — {skill.description} (file: {skill.source})"
         for skill in sorted(skills, key=lambda s: s.name)
     ]
     header = "Available skills (invoke with /skill:<name>):"

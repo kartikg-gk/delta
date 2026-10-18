@@ -6,12 +6,15 @@ references; the app performs the actual switch through the adapter.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import Label, ListItem, ListView
+from textual.widgets import Label, ListItem, ListView, Static
 
 from delta_app.tui.adapter import SessionEntry
+from delta_app.subagents import SubagentRun
 
 
 class SessionItem(ListItem):
@@ -63,6 +66,14 @@ class Sidebar(Vertical):
     def compose(self) -> ComposeResult:
         yield Label("Sessions", id="sidebar-title")
         yield SessionList()
+        yield Label("Subagents", id="subagent-title")
+        yield Static("No subagents", id="subagent-progress", markup=False)
+
+    def show_subagents(self, runs: Iterable[SubagentRun]) -> None:
+        self.query_one("#subagent-progress", Static).update("\n".join(
+            f"{run.id} [{run.status}]\n{run.task[:60]}\n{run.progress}"
+            for run in runs
+        ) or "No subagents")
 
     async def show(self, entries: list[SessionEntry]) -> None:
         """Repaint the list, highlighting the active session.

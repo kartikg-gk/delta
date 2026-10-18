@@ -14,7 +14,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, Label, ListItem, ListView
 
-from delta_app.config.store import PROVIDERS, ProviderInfo, load_config
+from delta_app.catalog import available_providers
+from delta_app.config.store import ProviderInfo, load_config
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,12 +41,16 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
 
     BINDINGS = [("escape", "cancel", "Cancel")]
 
-    def __init__(self, current_provider: str = "", current_model: str = "") -> None:
+    def __init__(
+        self, current_provider: str = "", current_model: str = "", *, login: bool = False,
+    ) -> None:
         super().__init__()
         self._current_provider = current_provider
         self._current_model = current_model
         self._info: ProviderInfo | None = None
         self._model: str = ""
+        self._login = login
+        self._providers = available_providers()
 
     # -- composition --------------------------------------------------------
 
@@ -67,7 +72,7 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
         self.query_one("#model-title", Label).update("Select provider")
         listing = self.query_one("#model-list", ListView)
         listing.clear()
-        for info in PROVIDERS:
+        for info in self._providers:
             marker = "●" if info.key == self._current_provider else " "
             listing.append(_Row(f"{marker} {info.label}", info.key))
         listing.index = 0
@@ -114,7 +119,7 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
             self._on_model_chosen(row.value)
 
     def _on_provider_chosen(self, key: str) -> None:
-        info = next((p for p in PROVIDERS if p.key == key), None)
+        info = next((p for p in self._providers if p.key == key), None)
         if info is None:
             return
         self._show_models(info)
@@ -122,7 +127,7 @@ class ModelScreen(ModalScreen[ModelChoice | None]):
     def _on_model_chosen(self, model: str) -> None:
         assert self._info is not None
         self._model = model
-        if not self._info.needs_key or self._stored_key(self._info):
+        if not self._info.needs_key or (not self._login and self._stored_key(self._info)):
             self._finish(None)
             return
         self._show_key_prompt()

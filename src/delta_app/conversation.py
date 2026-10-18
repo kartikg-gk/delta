@@ -118,6 +118,8 @@ _RUNNABLE_COMMANDS: frozenset[str] = frozenset({
     "branch", "branches", "compact", "continue", "create-skill", "diag",
     "export", "help", "model", "name", "plan", "provider", "quit", "reload",
     "rewind", "session", "shell", "skills", "stats", "system", "think", "version",
+    "login", "tools", "prompts",
+    "local", "agent", "agents",
 })
 
 _RUNNABLE_COMMAND_TABLE: tuple[tuple[str, str], ...] = tuple(
@@ -502,6 +504,9 @@ class CodingSession:
             self._record_ids[-1] if self._record_ids else None
         )
         self._extensions: list[object] = []
+        from delta_app.subagents import SubagentManager
+
+        self.subagents = SubagentManager(self)
         self._named = title is not None
         self._named_at = 0
         self._renamed_manually = False
@@ -728,6 +733,7 @@ class CodingSession:
 
     async def shutdown(self) -> None:
         """Flush pending state and release resources."""
+        await self.subagents.shutdown()
         self._unsubscribe()
         if self._tip_id and self._pending_header is None:
             await self._append_record(
@@ -1088,9 +1094,52 @@ class CodingSession:
             "reload": self._cmd_reload,
             "diag": self._cmd_diag,
             "system": self._cmd_system,
+            "tools": self._cmd_tools,
+            "prompts": self._cmd_prompts,
+            "local": self._cmd_local,
+            "agent": self.subagents.command,
+            "agents": self._cmd_agents,
             "session": self._cmd_session,
             "help": self._cmd_help,
         }
+
+    async def _cmd_local(self, arg: str) -> str:
+        from delta_app.local import local_command
+
+        return await local_command(self, arg)
+
+    async def _cmd_agents(self, _arg: str) -> str:
+        return await self.subagents.command("list")
+
+    def _cmd_tools(self, arg: str) -> str:
+        """Inspect the tools and their schemas without invoking them."""
+        import json
+
+        if arg:
+            tool = next((t for t in self._all_tools if t.name.lower() == arg.lower()), None)
+            if tool is None:
+                return f"Unknown tool: {arg}"
+            return f"{tool.name}: {tool.description}\n{json.dumps(tool.parameters, indent=2)}"
+        return "Tools:\n" + "\n".join(
+            f"  {t.name}: {t.description}" for t in self._harness.settings.tools
+        ) + "\nUse /tools <name> to inspect its schema."
+
+    def _cmd_prompts(self, arg: str) -> str:
+        """List, view, or reload prompt templates."""
+        if arg == "reload":
+            if self._templates_loader is not None:
+                self._templates = list(self._templates_loader())
+            return f"Loaded {len(self._templates)} prompt template(s)."
+        if arg:
+            template = next((t for t in self._templates if t.name == arg), None)
+            if template is None:
+                return f"Unknown prompt template: {arg}"
+            return f"/{template.name} ({template.path})\n\n{template.content}"
+        if not self._templates:
+            return "No prompt templates loaded. Add .delta/prompts/*.md, then /prompts reload."
+        return "Prompt templates:\n" + "\n".join(
+            f"  /{t.name}: {t.description}" for t in self._templates
+        ) + "\nUse /<name> [arguments] to run one, /prompts <name> to view it."
 
     def _cmd_help(self, _arg: str) -> str:
         """List every command available here, with usage and aliases.

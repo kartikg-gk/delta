@@ -506,6 +506,14 @@ def _cmd_theme(ctx: CommandContext) -> CommandResult:
     return _ok(extras={"theme_requested": True, "theme_value": ctx.args})
 
 
+def _cmd_local(ctx: CommandContext) -> CommandResult:
+    return _ok(extras={"local_requested": True, "arguments": ctx.args})
+
+
+def _cmd_agent(ctx: CommandContext) -> CommandResult:
+    return _ok(extras={"agent_requested": True, "arguments": ctx.args})
+
+
 def _cmd_login(ctx: CommandContext) -> CommandResult:
     """Request provider authentication."""
     provider = ctx.args or ""
@@ -540,6 +548,12 @@ def build_default_registry() -> CommandRegistry:
     reg = CommandRegistry()
 
     _BUILTINS: list[SlashCommand] = [
+        SlashCommand(name="local", description="Discover, download, load or unload GGUF models",
+                     handler=_cmd_local, usage="/local [list|search|download|load|unload]"),
+        SlashCommand(name="agent", description="Launch or inspect a user-requested subagent",
+                     handler=_cmd_agent, usage="/agent <task> | stop|result|view <id>"),
+        SlashCommand(name="agents", description="List subagents and their progress",
+                     handler=_cmd_agent, usage="/agents"),
         SlashCommand(
             name="help",
             description="Show available commands",

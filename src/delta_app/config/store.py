@@ -31,6 +31,14 @@ class ProviderInfo:
 
 PROVIDERS: tuple[ProviderInfo, ...] = (
     ProviderInfo(
+        key="codex", label="ChatGPT / Codex subscription", key_env="CODEX_ACCESS_TOKEN",
+        base_url="", models=("gpt-5-codex",), needs_key=False,
+    ),
+    ProviderInfo(
+        key="claude-code", label="Claude subscription", key_env="CLAUDE_CODE_OAUTH_TOKEN",
+        base_url="", models=("sonnet", "opus", "haiku"), needs_key=False,
+    ),
+    ProviderInfo(
         key="openai",
         label="OpenAI",
         key_env="OPENAI_API_KEY",
@@ -79,10 +87,9 @@ PROVIDERS: tuple[ProviderInfo, ...] = (
 
 def provider_info(key: str) -> ProviderInfo:
     """Look up provider metadata by key, raising ``KeyError`` when unknown."""
-    for info in PROVIDERS:
-        if info.key == key:
-            return info
-    raise KeyError(key)
+    from delta_app.catalog import lookup_provider
+
+    return lookup_provider(key)
 
 
 PROVIDER_KEYS: tuple[str, ...] = tuple(p.key for p in PROVIDERS)
