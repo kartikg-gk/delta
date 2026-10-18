@@ -21,6 +21,23 @@ from delta_model._oai.helpers import ServerSentEvent, parse_retry_after
 
 _RETRIABLE_CODES = frozenset({408, 409, 425, 429})
 
+# Phrases in a 429 body meaning the account is out of quota, not just busy.
+_EXHAUSTION_PHRASES = (
+    "insufficient_quota",
+    "quota exceeded",
+    "usage limit",
+    "usage_limit",
+    "usagelimit",
+    "billing",
+    "out of budget",
+    "available balance",
+)
+
+
+def _exhausted(body: str) -> bool:
+    text = body.lower()
+    return any(phrase in text for phrase in _EXHAUSTION_PHRASES)
+
 
 # ---------------------------------------------------------------------------
 # Error types
@@ -56,7 +73,13 @@ class HttpStreamError(Exception):
 
     @property
     def retriable(self) -> bool:
-        """Return whether this status code warrants an automatic reattempt."""
+        """Return whether this status code warrants an automatic reattempt.
+
+        A 429 that reports an exhausted quota or plan limit will not clear up
+        by waiting a few seconds, so it is reported straight away.
+        """
+        if self.status == 429 and _exhausted(self.body):
+            return False
         return self.status in _RETRIABLE_CODES or self.status >= 500
 
 

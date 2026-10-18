@@ -288,6 +288,7 @@ def _compose_body(
     max_tokens: int,
     thinking: ReasoningPolicy,
     cache_retention: str = "none",
+    oauth_system_prompt: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the complete Messages API request body."""
     marker = _cache_marker(cache_retention)
@@ -300,6 +301,13 @@ def _compose_body(
         "messages": compiled,
         "stream": True,
     }
+    if oauth_system_prompt:
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": oauth_system_prompt}]
+        if system:
+            blocks.append({"type": "text", "text": system})
+        if marker is not None:
+            blocks[-1]["cache_control"] = dict(marker)
+        body["system"] = blocks
     if tools:
         body["tools"] = [_tool_schema(t) for t in tools]
         if marker is not None:
@@ -418,6 +426,7 @@ class AnthropicProvider:
             messages=messages,
             tools=tools,
             max_tokens=self._profile.max_tokens,
+            oauth_system_prompt=self._profile.oauth_system_prompt,
             thinking=self._profile.reasoning,
             cache_retention=resolve_cache_retention(
                 self._profile.cache_retention, cred.base_url,

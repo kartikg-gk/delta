@@ -165,6 +165,7 @@ class AnthropicProfile:
     # decides from the endpoint: first-party hosts get ``short``; gateways that
     # merely speak the protocol get ``none``, since they may reject the markers.
     cache_retention: Literal["none", "short", "long"] | None = None
+    oauth_system_prompt: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

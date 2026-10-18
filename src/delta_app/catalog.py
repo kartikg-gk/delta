@@ -418,10 +418,19 @@ def lookup_provider(key: str) -> ProviderInfo:
     raise KeyError(key)
 
 
+# Providers that serve another provider's models under a plan: limits and
+# reasoning come from the original listing, prices do not apply.
+_PLAN_FACTS_FROM = {"chatgpt": "openai", "claude": "anthropic"}
+
+
 def model_info(provider: str, model: str) -> ModelInfo | None:
     """Catalog facts for one model, or ``None`` when the catalog has none."""
     parsed, _ = _catalog()
-    return parsed.get(provider, {}).get(model)
+    info = parsed.get(provider, {}).get(model)
+    if info is None and provider in _PLAN_FACTS_FROM:
+        listed = parsed.get(_PLAN_FACTS_FROM[provider], {}).get(model)
+        info = replace(listed, pricing=None) if listed is not None else None
+    return info
 
 
 def models_for(provider: str) -> tuple[str, ...]:

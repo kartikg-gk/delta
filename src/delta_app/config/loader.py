@@ -69,6 +69,8 @@ def apply_config(provider: str, config: DeltaConfig | None = None) -> None:
         info = provider_info(provider)
     except KeyError:
         return
+    if not info.key_env:
+        return  # signs in instead of using a key; nothing to export
 
     cfg = load_config() if config is None else config
     key = cfg.api_keys.get(provider)

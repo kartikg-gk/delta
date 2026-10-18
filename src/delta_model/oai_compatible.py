@@ -29,6 +29,7 @@ import ssl
 from collections.abc import AsyncIterator, Sequence
 from contextlib import aclosing
 from dataclasses import replace
+from typing import Any
 
 import httpx
 
@@ -139,6 +140,30 @@ class OpenAIProvider:
             headers[key] = value
         return headers
 
+    def _request(
+        self,
+        *,
+        model: str,
+        system: str,
+        messages: Sequence[TranscriptEntry],
+        tools: Sequence[ToolSpec],
+        base_url: str,
+    ) -> tuple[str, str, dict[str, Any]]:
+        """Pick the endpoint and build the request: ``(endpoint, url, body)``."""
+        endpoint = pick_endpoint(model, base_url)
+        reasoning_extra = build_reasoning_extra(
+            self._profile.reasoning, model=model, endpoint=endpoint,
+        )
+        if endpoint == "responses":
+            return endpoint, f"{base_url}/responses", build_responses_payload(
+                model=model, system=system, messages=messages, tools=tools,
+                extra=reasoning_extra or None,
+            )
+        return endpoint, f"{base_url}/chat/completions", build_chat_payload(
+            model=model, system=system, messages=messages, tools=tools,
+            extra=reasoning_extra or None,
+        )
+
     async def _stream(
         self,
         *,
@@ -154,29 +179,9 @@ class OpenAIProvider:
         self.last_failure_status = None
         cred = await self._resolve_credential()
         base_url = cred.base_url.rstrip("/")
-        endpoint = pick_endpoint(model, base_url)
-        reasoning_extra = build_reasoning_extra(
-            self._profile.reasoning, model=model, endpoint=endpoint,
+        endpoint, url, payload = self._request(
+            model=model, system=system, messages=messages, tools=tools, base_url=base_url,
         )
-
-        if endpoint == "responses":
-            url = f"{base_url}/responses"
-            payload = build_responses_payload(
-                model=model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                extra=reasoning_extra or None,
-            )
-        else:
-            url = f"{base_url}/chat/completions"
-            payload = build_chat_payload(
-                model=model,
-                system=system,
-                messages=messages,
-                tools=tools,
-                extra=reasoning_extra or None,
-            )
 
         routing_key = self._routing_key(cache_key, base_url)
         if routing_key is not None:

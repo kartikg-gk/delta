@@ -58,7 +58,9 @@ _PACKAGE = "deltaa"
 _DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 _DEFAULT_OPENAI_MODEL = "gpt-5"
 _DEFAULT_SYSTEM = "You are a helpful coding assistant."
-_SUBCOMMANDS = frozenset({"config", "provider", "session", "tui", "update", "login"})
+_SUBCOMMANDS = frozenset({
+    "config", "provider", "session", "tui", "update", "login", "logout",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -664,6 +666,13 @@ async def _run_interactive(session: CodingSession) -> int:
             continue
 
         # Session-level slash commands (/model, /compact, /stats, /export, ...)
+        if text.split(maxsplit=1)[0] == "/logout":
+            import shlex
+
+            from delta_app.auth import logout_cli
+
+            logout_cli(shlex.split(text)[1:])
+            continue
         if text.split(maxsplit=1)[0] == "/login":
             import shlex
 
@@ -834,6 +843,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from delta_app.auth import login_cli
 
             return login_cli(rest)
+        if cmd == "logout":
+            from delta_app.auth import logout_cli
+
+            return logout_cli(rest)
         if cmd == "config":
             from delta_app.cli.config_cmd import handle_config
             return handle_config(rest)

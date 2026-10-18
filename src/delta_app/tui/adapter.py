@@ -245,6 +245,19 @@ class SessionBridge:
             await self._session.switch_model(model)
             return f"Switched to {provider} · {model}"
 
+        if not info.key_env:
+            # A plan sign-in: no key to export, and the shared OPENAI_*
+            # variables must stay as the other providers left them.
+            provider_obj = resolve_provider(provider)
+            config = load_config()
+            config.provider, config.model = provider, model
+            save_config(config)
+            if provider == self._session.provider_name:
+                await self._session.switch_model(model)
+            else:
+                await self._session.switch_provider(provider_obj, provider, model)
+            return f"Switched to {info.label} · {model}"
+
         # Save the key (and the selection) so the next launch reuses them.
         config = load_config()
         if api_key:

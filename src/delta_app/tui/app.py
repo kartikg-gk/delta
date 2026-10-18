@@ -288,6 +288,12 @@ class DeltaApp(App[None]):
             provider = text.split(maxsplit=1)[1] if " " in text else ""
             self.run_worker(self._open_login(provider))
             return
+        if text.split(maxsplit=1)[0] == "/logout":
+            from delta_app.accounts import sign_out
+
+            transcript = self.query_one(TranscriptView)
+            transcript.add_notice("Signed out of ChatGPT." if sign_out() else "Not signed in.")
+            return
         if text.strip() in {"/model", "/provider"}:
             # push_screen_wait requires a worker context.
             self.run_worker(self._open_model_picker())
@@ -322,12 +328,56 @@ class DeltaApp(App[None]):
     async def _open_login(self, provider: str = "") -> None:
         if self._bridge is None:
             return
-        session = self._bridge.session
-        choice = await self.push_screen_wait(
-            ModelScreen(session.provider_name, session.model, login=True)
-        )
+        from delta_app.accounts import CHATGPT, SignInError, sign_in
+        from delta_app.config.store import provider_info
+
+        transcript = self.query_one(TranscriptView)
+        if provider in (CHATGPT, "claude"):
+            info = provider_info(provider)
+            choice: ModelChoice | None = ModelChoice(provider, info.label, info.models[0], None)
+        else:
+            session = self._bridge.session
+            choice = await self.push_screen_wait(
+                ModelScreen(session.provider_name, session.model, login=True)
+            )
         if choice is None:
             return
+        if choice.provider == CHATGPT:
+            transcript.add_notice("Opening your browser to sign in to ChatGPT…")
+            try:
+                await sign_in(show_url=lambda url: transcript.add_notice(
+                    "If the browser did not open, visit this link (on another machine, "
+                    f"run `delta login chatgpt` in a terminal instead):\n{url}"
+                ))
+            except SignInError as exc:
+                transcript.add_notice(f"Sign-in failed: {exc}", error=True)
+                return
+            transcript.add_notice("Signed in to your ChatGPT plan.")
+        if choice.provider == "claude":
+            from delta_app.claude_accounts import SignInError as ClaudeSignInError
+            from delta_app.claude_accounts import sign_in as claude_sign_in
+            from delta_app.tui.claude_login_screen import ClaudeLoginScreen
+
+            transcript.add_notice("Opening your browser to sign in to Claude…")
+            login_screen: ClaudeLoginScreen | None = None
+
+            def show_claude_url(url: str) -> None:
+                nonlocal login_screen
+                login_screen = ClaudeLoginScreen(url)
+
+            async def ask_claude_code() -> str:
+                assert login_screen is not None
+                return await self.push_screen_wait(login_screen)
+
+            try:
+                await claude_sign_in(show_url=show_claude_url, ask_code=ask_claude_code)
+            except ClaudeSignInError as exc:
+                transcript.add_notice(f"Sign-in failed: {exc}", error=True)
+                return
+            finally:
+                if login_screen is not None and login_screen in self.screen_stack:
+                    self.pop_screen()
+            transcript.add_notice("Signed in to your Claude plan.")
         await self._apply_model_choice(choice)
 
     async def _apply_model_choice(self, choice: ModelChoice) -> None:

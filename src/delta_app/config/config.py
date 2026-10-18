@@ -31,7 +31,10 @@ from delta_model.settings import (
 # Known provider identifiers
 # ---------------------------------------------------------------------------
 
-_KNOWN_PROVIDERS = ("anthropic", "openai", "openrouter", "ollama", "huggingface", "scripted")
+_KNOWN_PROVIDERS = (
+    "claude",
+    "anthropic", "openai", "openrouter", "ollama", "huggingface", "chatgpt", "scripted",
+)
 
 # OpenAI-compatible backends reuse the OpenAI adapter with a different base URL.
 _OPENAI_COMPATIBLE = ("openai", "openrouter", "ollama", "huggingface")
@@ -96,6 +99,26 @@ def _build_openai(profile: OpenAIProfile) -> ModelProvider:
     return OpenAIProvider(profile)  # type: ignore[return-value]
 
 
+def _build_chatgpt() -> ModelProvider:
+    """The ChatGPT-plan provider, backed by the saved sign-in."""
+    from delta_app.accounts import chatgpt_credential, load_login
+    from delta_model.chatgpt import CHATGPT_BASE_URL, ChatGPTProvider
+    from delta_model.settings import Credential, OpenAIProfile, RetryPolicy
+
+    if load_login() is None:
+        raise ConfigError(
+            "Not signed in to a ChatGPT plan.\n"
+            "  Run 'delta login chatgpt' to sign in with your browser."
+        )
+    profile = OpenAIProfile(
+        name="chatgpt",
+        credential=Credential(api_key=None, base_url=CHATGPT_BASE_URL),
+        retry=RetryPolicy(),
+        resolver=chatgpt_credential,
+    )
+    return ChatGPTProvider(profile)
+
+
 # ---------------------------------------------------------------------------
 # Resolution
 # ---------------------------------------------------------------------------
@@ -117,6 +140,13 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
         )
 
     resolved = resolved.strip().lower()
+    if resolved == "claude":
+        from delta_app.claude_login import build_provider
+
+        return build_provider()
+    if resolved == "chatgpt":
+        return _build_chatgpt()
+
     if resolved == "anthropic":
         profile = load_anthropic_profile()
         return _build_anthropic(profile)
@@ -147,6 +177,10 @@ def resolve_provider(name: str | None = None) -> ModelProvider:
 
 def _probe_status(provider_name: str) -> str:
     """Return a short status string for a provider: 'ready', 'no key', etc."""
+    if provider_name == "claude":
+        from delta_app.claude_accounts import load_login
+
+        return "ready" if load_login() else "signed out (delta login claude)"
     if provider_name == "anthropic":
         if not os.environ.get("ANTHROPIC_API_KEY"):
             return "no key  (set ANTHROPIC_API_KEY)"
